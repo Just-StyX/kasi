@@ -9,7 +9,6 @@ repository = "https://github.com"
 documentation = "https://docs.rs"
 keywords = ["web", "async", "hyper", "framework", "microservice"]
 categories = ["web-programming::http-server", "asynchronous"]
-readme = "README.md"
 
 [lib]
 proc-macro = true

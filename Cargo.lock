@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bytes",
  "http",
@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-jb"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "http",
  "hyper",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-macros"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-security"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "http",
  "http-body-util",
