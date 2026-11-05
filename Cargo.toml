@@ -62,7 +62,7 @@ description.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs"
 keywords = ["web", "async", "hyper", "framework", "microservice"]
-categories = ["web-programming::http-servers", "asynchronous"]
+categories = ["web-programming::http-server", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
