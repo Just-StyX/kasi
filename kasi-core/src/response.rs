@@ -1,7 +1,7 @@
 use crate::{BoxBody, Error, error::RequestContext};
+use bytes::Bytes;
 use http::{Response, StatusCode, header};
 use http_body_util::{BodyExt, Full};
-use bytes::Bytes;
 
 pub trait IntoResponse {
     fn into_response(self) -> Response<BoxBody>;
@@ -17,9 +17,7 @@ impl IntoResponse for Response<BoxBody> {
 // 2. Allow users to return simple text strings
 impl IntoResponse for String {
     fn into_response(self) -> Response<BoxBody> {
-        let body = Full::new(Bytes::from(self))
-            .map_err(|e| match e {})
-            .boxed();
+        let body = Full::new(Bytes::from(self)).map_err(|e| match e {}).boxed();
 
         Response::builder()
             .status(StatusCode::OK)
@@ -39,7 +37,8 @@ impl IntoResponse for &'static str {
 // 4. Map your internal framework Error to a response automatically
 impl IntoResponse for Error {
     fn into_response(self) -> Response<BoxBody> {
-        let temporary_context: RequestContext = ("/unknown", "unknown", uuid::Uuid::new_v4()).into();
+        let temporary_context: RequestContext =
+            ("/unknown", "unknown", uuid::Uuid::new_v4()).into();
         self.into_response_with_context(&temporary_context)
     }
 }

@@ -1,31 +1,36 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
-pub use http::{Method, Request, Response, StatusCode, Extensions};
-pub use http_body_util::combinators;
-pub use hyper::body::Incoming;
-pub use http_body_util::{Full, BodyExt };
 pub use bytes::Bytes;
+pub use http::{Extensions, Method, Request, Response, StatusCode};
+pub use http_body_util::combinators;
+pub use http_body_util::{BodyExt, Full};
+pub use hyper::body::Incoming;
+pub use hyper::service::service_fn;
 pub use hyper_util::rt::TokioIo;
 pub use hyper_util::{rt::TokioExecutor, server::conn::auto};
 pub use tokio::net::TcpListener;
-pub use hyper::service::service_fn;
 
 use crate::openapi::{EndpointMetadata, InfoSpec, OpenApiSpec};
-use crate::{error::{Error, RequestContext}, extract::PathParams, middleware::{Module, Next, RegisterRoute}};
+use crate::{
+    error::{Error, RequestContext},
+    extract::PathParams,
+    middleware::{Module, Next, RegisterRoute},
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type BoxBody = combinators::BoxBody<Bytes, hyper::Error>;
-pub type HandlerFn = Arc<dyn Fn(Request<Incoming>) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>;
+pub type HandlerFn =
+    Arc<dyn Fn(Request<Incoming>) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>;
 
-pub mod middleware;
-pub mod extract;
 pub mod error;
-pub mod testing;
-pub mod response;
+pub mod extract;
+pub mod middleware;
 pub mod openapi;
+pub mod response;
+pub mod testing;
 
 #[derive(Clone)]
 struct OpenApiJsonBytes(pub bytes::Bytes);
@@ -40,7 +45,7 @@ pub struct Router {
 
 impl Router {
     pub fn new() -> Self {
-        Self { 
+        Self {
             routes: HashMap::new(),
             metadata: HashMap::new(),
         }
@@ -51,27 +56,33 @@ impl Router {
     }
 
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
-    pub fn add_route<F, Fut>(&mut self, method: Method, path: &str, handler: F) 
-    where 
+    pub fn add_route<F, Fut>(&mut self, method: Method, path: &str, handler: F)
+    where
         F: Fn(Request<BoxBody>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response<BoxBody>> + Send + 'static,
     {
         let wrapped_handler = Arc::new(move |req: Request<Incoming>| {
             let (parts, body) = req.into_parts();
-            let boxed_body = body
-                .map_err(|e| hyper::Error::from(e)) 
-                .boxed();
-                
+            let boxed_body = body.map_err(|e| hyper::Error::from(e)).boxed();
+
             let transformed_req = Request::from_parts(parts, boxed_body);
             let fut = handler(transformed_req);
             Box::pin(fut) as BoxFuture<'static, Response<BoxBody>>
         });
 
-        self.routes.insert((method, path.to_string()), wrapped_handler);
+        self.routes
+            .insert((method, path.to_string()), wrapped_handler);
     }
 
-    pub fn add_endpoint_with_meta(&mut self, method: Method, path: &str, handler: HandlerFn, meta: EndpointMetadata) {
-        self.routes.insert((method.clone(), path.to_string()), handler);
+    pub fn add_endpoint_with_meta(
+        &mut self,
+        method: Method,
+        path: &str,
+        handler: HandlerFn,
+        meta: EndpointMetadata,
+    ) {
+        self.routes
+            .insert((method.clone(), path.to_string()), handler);
         self.metadata.insert((method, path.to_string()), meta);
     }
 
@@ -85,7 +96,8 @@ impl Router {
         if let Some(handler) = self.routes.get(&key) {
             handler(req).await
         } else {
-            Error::NotFound(format!("No route found for {} {}", key.0, key.1)).into_response_with_context(&context_frame)
+            Error::NotFound(format!("No route found for {} {}", key.0, key.1))
+                .into_response_with_context(&context_frame)
         }
     }
 }
@@ -128,8 +140,9 @@ impl Application {
 
         for ((method, path), meta) in &self.router.metadata {
             let method_string = method.to_string().to_lowercase();
-            
-            paths.entry(path.clone())
+
+            paths
+                .entry(path.clone())
                 .or_default()
                 .insert(method_string, meta.clone());
         }
@@ -151,7 +164,7 @@ impl Application {
         // Compile the specification document based on macro compile data
         let spec = self.generate_openapi_spec("Kasi Microservice Engine", "1.0.0");
         let spec_json_bytes = bytes::Bytes::from(serde_json::to_string_pretty(&spec).unwrap());
-        
+
         // FIXED: Insert using our unique structural wrapper type
         self.extensions.insert(OpenApiJsonBytes(spec_json_bytes));
 
@@ -182,16 +195,23 @@ impl Application {
             </script>
         </body>
         </html>
-        "#.to_string();
-        
+        "#
+        .to_string();
+
         let swagger_bytes = bytes::Bytes::from(swagger_ui_html);
         // FIXED: Insert using our unique structural wrapper type
         self.extensions.insert(SwaggerHtmlBytes(swagger_bytes));
 
         println!("Kasi server listening natively on http://{}", addr);
-        println!("OpenAPI JSON documentation structure available at http://{}/openapi.json", addr);
-        println!("Graphical Swagger UI Dashboard active at http://{}/docs", addr);
-        
+        println!(
+            "OpenAPI JSON documentation structure available at http://{}/openapi.json",
+            addr
+        );
+        println!(
+            "Graphical Swagger UI Dashboard active at http://{}/docs",
+            addr
+        );
+
         let shared_router = Arc::new(self.router);
         let shared_extensions = Arc::new(self.extensions);
 
@@ -212,8 +232,16 @@ impl Application {
                         if req.uri().path() == "/openapi.json" && req.method() == Method::GET {
                             // FIXED: Look up via our unique type identifier
                             if let Some(wrapped_json) = extensions.get::<OpenApiJsonBytes>() {
-                                let body = http_body_util::Full::new(wrapped_json.0.clone()).map_err(|e| match e {}).boxed();
-                                return Ok::<_, hyper::Error>(Response::builder().status(200).header("Content-Type", "application/json").body(body).unwrap());
+                                let body = http_body_util::Full::new(wrapped_json.0.clone())
+                                    .map_err(|e| match e {})
+                                    .boxed();
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(200)
+                                        .header("Content-Type", "application/json")
+                                        .body(body)
+                                        .unwrap(),
+                                );
                             }
                         }
 
@@ -221,19 +249,25 @@ impl Application {
                         if req.uri().path() == "/docs" && req.method() == Method::GET {
                             // FIXED: Look up via our unique type identifier
                             if let Some(wrapped_html) = extensions.get::<SwaggerHtmlBytes>() {
-                                let body = http_body_util::Full::new(wrapped_html.0.clone()).map_err(|e| match e {}).boxed();
-                                return Ok::<_, hyper::Error>(Response::builder()
-                                    .status(200)
-                                    .header("Content-Type", "text/html; charset=utf-8")
-                                    .body(body)
-                                    .unwrap());
+                                let body = http_body_util::Full::new(wrapped_html.0.clone())
+                                    .map_err(|e| match e {})
+                                    .boxed();
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(200)
+                                        .header("Content-Type", "text/html; charset=utf-8")
+                                        .body(body)
+                                        .unwrap(),
+                                );
                             }
                         }
 
                         Ok::<_, hyper::Error>(router.dispatch(req).await)
                     }
                 });
-                let _ = auto::Builder::new(TokioExecutor::new()).serve_connection(io, service).await;
+                let _ = auto::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
             });
         }
     }
@@ -252,7 +286,7 @@ pub struct ApplicationBuilder {
 impl ApplicationBuilder {
     pub fn new(config: Config) -> Self {
         Self {
-            config, 
+            config,
             router: Router::new(),
             extensions: Extensions::new(),
         }
@@ -267,7 +301,7 @@ impl ApplicationBuilder {
     }
 
     pub fn add_raw_route<F, Fut>(mut self, method: Method, path: &str, handler: F) -> Self
-    where 
+    where
         F: Fn(Request<BoxBody>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response<BoxBody>> + Send + 'static,
     {
@@ -276,8 +310,8 @@ impl ApplicationBuilder {
     }
 
     pub async fn build(self) -> Result<Application, Error> {
-        Ok(Application { 
-            router: self.router, 
+        Ok(Application {
+            router: self.router,
             config: self.config,
             extensions: self.extensions,
         })
@@ -311,4 +345,3 @@ impl ApplicationBuilder {
         self
     }
 }
-

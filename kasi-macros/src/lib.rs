@@ -1,7 +1,13 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Attribute, Data, DeriveInput, Expr, ExprArray, ExprLit, ExprPath, Fields, FnArg, Ident, ItemFn, Lit::{self, }, LitStr, Token, parse::Parse, parse_macro_input, parse2};
+use syn::{
+    Attribute, Data, DeriveInput, Expr, ExprArray, ExprLit, ExprPath, Fields, FnArg, Ident, ItemFn,
+    Lit::{self},
+    LitStr, Token,
+    parse::Parse,
+    parse_macro_input, parse2,
+};
 
 #[proc_macro_attribute]
 pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
@@ -15,7 +21,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
     let path_lit = parsed_args.path;
 
     let input_fn = parse_macro_input!(input as ItemFn);
-    
+
     // Parse security and response metadata configurations out of function attributes
     let security_metadata = parse_security_attributes(&input_fn.attrs);
     let response_metadata = parse_response_attribute(&input_fn.attrs);
@@ -27,7 +33,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
     let fn_output = &input_fn.sig.output;
 
     let auth_context_var = quote::format_ident!("__global_auth_context");
-    
+
     // 1. GENERATE SECURITY ENFORCEMENT CODE
     let security_check_block = if let Some(meta) = security_metadata {
         let required_roles = meta.roles;
@@ -50,7 +56,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
     for resp in response_metadata {
         let status = resp.status;
         let description = resp.description;
-        
+
         let json_value = match resp.json_model {
             Some(model_name) => quote! { Some(#model_name) },
             None => quote! { None },
@@ -72,7 +78,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
 
             // Determine if the requested signature input parameter matches AuthContext
             let is_auth_context = quote!(#ty).to_string().contains("AuthContext");
-            
+
             if is_auth_context {
                 // If it is AuthContext, we inject the pre-verified profile context instead of running extract
                 extraction_blocks.push(quote! {
@@ -87,7 +93,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                     };
                 });
             }
-            
+
             handler_arguments.push(quote! { #var_name });
         }
     }
@@ -147,12 +153,18 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                         let _ = attr.parse_nested_meta(|meta| {
                             if meta.path.is_ident("status") {
                                 let expr: Expr = meta.value()?.parse()?;
-                                if let Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) = expr {
+                                if let Expr::Lit(ExprLit {
+                                    lit: Lit::Int(i), ..
+                                }) = expr
+                                {
                                     status_code = i.base10_parse().unwrap_or(500);
                                 }
                             } else if meta.path.is_ident("title") {
                                 let expr: Expr = meta.value()?.parse()?;
-                                if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = expr {
+                                if let Expr::Lit(ExprLit {
+                                    lit: Lit::Str(s), ..
+                                }) = expr
+                                {
                                     title_str = s.value();
                                 }
                             }
@@ -207,7 +219,7 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                             .boxed();
 
                         kasi::prelude::Response::builder()
-                            .status(status_code) 
+                            .status(status_code)
                             .header("Content-Type", "application/problem+json")
                             .body(boxed_body)
                             .unwrap()
@@ -241,8 +253,11 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                 }
             }
         }
-        
-        Data::Union(_) => syn::Error::new_spanned(name, "IntoResponse custom derive cannot be used on Unions").to_compile_error(),
+
+        Data::Union(_) => {
+            syn::Error::new_spanned(name, "IntoResponse custom derive cannot be used on Unions")
+                .to_compile_error()
+        }
     };
 
     TokenStream::from(expanded)
@@ -261,15 +276,19 @@ pub fn main(_args: TokenStream, input: TokenStream) -> TokenStream {
     if input_fn.sig.asyncness.is_none() {
         return syn::Error::new_spanned(
             &input_fn.sig.ident,
-            "Kasi main entrypoint function must be declared as 'async fn main()'"
-        ).into_compile_error().into();
+            "Kasi main entrypoint function must be declared as 'async fn main()'",
+        )
+        .into_compile_error()
+        .into();
     }
 
     if !input_fn.sig.inputs.is_empty() {
         return syn::Error::new_spanned(
             &input_fn.sig.inputs,
-            "Kasi main function cannot take any input arguments."
-        ).into_compile_error().into();
+            "Kasi main function cannot take any input arguments.",
+        )
+        .into_compile_error()
+        .into();
     }
 
     let expanded = quote! {
@@ -341,14 +360,20 @@ fn parse_security_attributes(attrs: &[Attribute]) -> Option<SecurityAttr> {
             let parse_result = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("RequireRole") {
                     let expr: Expr = meta.value()?.parse()?;
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = expr {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) = expr
+                    {
                         roles.push(s.value());
                     }
                 } else if meta.path.is_ident("OAuth2") {
                     let expr: Expr = meta.value()?.parse()?;
                     if let Expr::Array(ExprArray { elems, .. }) = expr {
                         for elem in elems {
-                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), ..}) = elem {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(s), ..
+                            }) = elem
+                            {
                                 scopes.push(s.value());
                             }
                         }
@@ -376,12 +401,18 @@ fn parse_response_attribute(attrs: &[Attribute]) -> Vec<ResponseAttr> {
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("status") {
                     let expr: Expr = meta.value()?.parse()?;
-                    if let Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) = expr {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Int(i), ..
+                    }) = expr
+                    {
                         status = i.base10_parse().unwrap_or(200);
                     }
                 } else if meta.path.is_ident("description") {
                     let expr: Expr = meta.value()?.parse()?;
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = expr {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) = expr
+                    {
                         description = s.value();
                     }
                 } else if meta.path.is_ident("json") {
@@ -392,15 +423,22 @@ fn parse_response_attribute(attrs: &[Attribute]) -> Vec<ResponseAttr> {
                         if let Some(ident) = path.get_ident() {
                             json_model = Some(ident.to_string());
                         }
-                    } 
+                    }
                     // Option B: Handles string literals -> #[response(json = "UserProfile")]
-                    else if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = expr {
+                    else if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) = expr
+                    {
                         json_model = Some(s.value());
                     }
                 }
                 Ok(())
             });
-            responses.push(ResponseAttr { status, description, json_model });
+            responses.push(ResponseAttr {
+                status,
+                description,
+                json_model,
+            });
         }
     }
     responses

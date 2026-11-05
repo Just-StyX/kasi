@@ -10,7 +10,8 @@ pub trait RegisterRoute {
 }
 
 pub struct Next {
-    pub(crate) chain: Box<dyn FnOnce(Request<Incoming>) -> BoxFuture<'static, Response<BoxBody>> + Send>,
+    pub(crate) chain:
+        Box<dyn FnOnce(Request<Incoming>) -> BoxFuture<'static, Response<BoxBody>> + Send>,
 }
 
 impl Next {
@@ -21,11 +22,12 @@ impl Next {
 
 #[allow(clippy::type_complexity)]
 pub struct InternalMiddlewareLayer {
-    pub(crate) run: Arc<dyn Fn(Request<Incoming>, Next) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>, 
+    pub(crate) run:
+        Arc<dyn Fn(Request<Incoming>, Next) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>,
 }
 
 pub fn from_fn<F, Fut>(f: F) -> InternalMiddlewareLayer
-where 
+where
     F: Fn(Request<Incoming>, Next) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<Response<BoxBody>, Error>> + Send + 'static,
 {
