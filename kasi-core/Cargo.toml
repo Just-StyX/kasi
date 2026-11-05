@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The core execution engine, async request extractors, and HTTP runtime routing components for the Kasi web framework."
+authors = ["Justice Sam <fjaccobian@gmail.com>"]
+repository = "https://github.com"
+documentation = "https://docs.rs"
+keywords = ["web", "async", "hyper", "framework", "microservice"]
+categories = ["web-programming::http-server", "asynchronous"]
+readme = "README.md"
 
 [dependencies]
 tokio.workspace = true

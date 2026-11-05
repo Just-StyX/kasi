@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Procedural compilation attributes and polymorphic response macros for the Kasi web framework ecosystem."
+authors = ["Justice Sam <fjaccobian@gmail.com>"]
+repository = "https://github.com"
+documentation = "https://docs.rs"
+keywords = ["web", "async", "hyper", "framework", "microservice"]
+categories = ["web-programming::http-server", "asynchronous"]
+readme = "README.md"
 
 [lib]
 proc-macro = true

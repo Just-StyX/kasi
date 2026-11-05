@@ -16,7 +16,7 @@ repository = "https://github.com"
 description = "An enterprise-grade, compile-time optimized async microservice framework built on Hyper 1.x and Tokio."
 documentation = "https://docs.rs"
 keywords = ["web", "async", "hyper", "framework", "microservice"]
-categories = ["web-programming::http-servers", "asynchronous"]
+categories = ["web-programming::http-server", "asynchronous"]
 readme = "README.md"
 
 [workspace.dependencies]
