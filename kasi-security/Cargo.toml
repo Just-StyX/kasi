@@ -17,4 +17,4 @@ openidconnect.workspace = true
 jsonwebtoken.workspace = true
 uuid.workspace = true
 sqlx.workspace = true
-kasi-core = { workspace = true }
+kasi-core = { workspace = true, features = ["postgres"] }

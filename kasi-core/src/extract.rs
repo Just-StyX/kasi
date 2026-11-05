@@ -46,7 +46,7 @@ impl FromRequest for Db {
     fn extract(req: Request<Incoming>) -> BoxFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
             let conn = req.extensions()
-                .get::<sea_orm::DatabaseConnection>()
+                .get()
                 .cloned()
                 .ok_or_else(|| Error::Internal(
                     "SeaORM DatabaseConnection handle missing from request extensions. Did you register it via .extension()?".into()
@@ -61,7 +61,7 @@ impl FromRequest for DbPool {
     fn extract(req: Request<Incoming>) -> BoxFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
             let pool = req.extensions()
-                .get::<sqlx::PgPool>()
+                .get()
                 .cloned() // PgPool wraps an internal Arc pool tracker, making clones incredibly cheap
                 .ok_or_else(|| Error::Internal(
                     "SQLx PgPool handle missing from request extensions. Did you register it via .extension()?".into()

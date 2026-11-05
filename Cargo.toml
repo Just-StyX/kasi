@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Justice Sam <fjaccobian@gmail.com>"]
 license = "MIT"
@@ -48,9 +48,9 @@ minijinja = { version = "3.0.5" }
 minijinja-embed = { version = "3.0.5" }
 uuid = { version = "1.29.0", features = ["v4", "serde"]}
 
-kasi-core = { version = "0.1.0", path = "./kasi-core" }
-kasi-security = { version = "0.1.0", path = "./kasi-security" }
-kasi-macros = { version = "0.1.0", path = "./kasi-macros" }
+kasi-core = { version = "0.1.2", path = "./kasi-core" }
+kasi-security = { version = "0.1.2", path = "./kasi-security" }
+kasi-macros = { version = "0.1.2", path = "./kasi-macros" }
 
 [package]
 name = "kasi-jb"
