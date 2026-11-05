@@ -121,12 +121,12 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             #(#doc_registrations)*
 
             // Mount straight into the internal router reference within your builder configuration
-            builder.router.add_endpoint_with_meta(
-                kasi_jb::prelude::Method::#method_ident,
-                #path_lit,
-                wrapped_handler,
-                endpoint_meta
-            );
+            // builder.router.add_endpoint_with_meta(
+            //     kasi_jb::prelude::Method::#method_ident,
+            //     #path_lit,
+            //     wrapped_handler,
+            //     endpoint_meta
+            // );
 
             builder.mount_endpoint(
                 kasi_jb::prelude::Method::#method_ident, 
@@ -135,7 +135,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                 endpoint_meta
             )
 
-            builder
+            // builder
         }
     };
     TokenStream::from(expanded)
