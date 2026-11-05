@@ -5,7 +5,7 @@ pub use kasi_security as ksecure;
 pub mod prelude {
     pub use kasi_core::{
         Application, ApplicationBuilder, BoxBody, Config, HandlerFn, Router,
-        middleware::{InternalMiddlewareLayer, Module, Next, RegisterRoute, }
+        middleware::{InternalMiddlewareLayer, Module, Next, RegisterRoute},
     };
 
     pub use kasi_core::testing::{TestRequestBuilder, TestResponse, TestServer};

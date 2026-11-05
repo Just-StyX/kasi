@@ -129,9 +129,9 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             // );
 
             builder.mount_endpoint(
-                kasi_jb::prelude::Method::#method_ident, 
-                #path_lit, 
-                wrapped_handler, 
+                kasi_jb::prelude::Method::#method_ident,
+                #path_lit,
+                wrapped_handler,
                 endpoint_meta
             )
 

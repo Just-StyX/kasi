@@ -307,7 +307,8 @@ impl ApplicationBuilder {
         handler: HandlerFn,
         meta: EndpointMetadata,
     ) -> Self {
-        self.router.add_endpoint_with_meta(method, path, handler, meta);
+        self.router
+            .add_endpoint_with_meta(method, path, handler, meta);
         self
     }
 
