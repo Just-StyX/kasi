@@ -283,6 +283,15 @@ impl AuthContext {
         })
     }
 
+    pub fn default_anonymous() -> Self {
+        Self {
+            user_id: uuid::Uuid::nil(),
+            email: "anonymous@kasi.local".into(),
+            active_roles: vec![],
+            scopes: vec![],
+        }
+    }
+
     pub fn has_role(&self, role: &str) -> bool {
         self.active_roles.iter().any(|r| r == role)
     }

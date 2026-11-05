@@ -17,7 +17,7 @@ use crate::openapi::{EndpointMetadata, InfoSpec, OpenApiSpec};
 use crate::{
     error::{Error, RequestContext},
     extract::PathParams,
-    middleware::{Module, Next, RegisterRoute},
+    middleware::{Module, Next},
 };
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -317,13 +317,17 @@ impl ApplicationBuilder {
         })
     }
 
-    pub fn route<R>(mut self, route_register: R) -> Self
-    where
-        R: RegisterRoute,
-    {
-        route_register.register_route(&mut self.router);
-        self
+    pub fn route(self, registration_wrapper: fn(Self) -> Self) -> Self {
+        registration_wrapper(self)
     }
+
+    // pub fn route<R>(mut self, route_register: R) -> Self
+    // where
+    //     R: RegisterRoute,
+    // {
+    //     route_register.register_route(&mut self.router);
+    //     self
+    // }
 
     pub fn register_module(mut self, module: Module) -> Self {
         for (method, path, base_handler) in module.endpoints {

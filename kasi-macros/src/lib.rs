@@ -22,7 +22,6 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let input_fn = parse_macro_input!(input as ItemFn);
 
-    // Parse security and response metadata configurations out of function attributes
     let security_metadata = parse_security_attributes(&input_fn.attrs);
     let response_metadata = parse_response_attribute(&input_fn.attrs);
 
@@ -46,8 +45,9 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             };
         }
     } else {
+        // Fix: Use an empty AuthContext profile instead of an Option variant to avoid mismatch errors
         quote! {
-            let #auth_context_var: Option<kasi_jb::prelude::AuthContext> = None;
+            let #auth_context_var = kasi_jb::prelude::AuthContext::default_anonymous();
         }
     };
 
@@ -76,16 +76,13 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             let ty = &pat_type.ty;
             let var_name = quote::format_ident!("__extracted_arg_{}", index);
 
-            // Determine if the requested signature input parameter matches AuthContext
             let is_auth_context = quote!(#ty).to_string().contains("AuthContext");
 
             if is_auth_context {
-                // If it is AuthContext, we inject the pre-verified profile context instead of running extract
                 extraction_blocks.push(quote! {
                     let #var_name = #auth_context_var.clone();
                 });
             } else {
-                // For all normal request components (Json, Query, Path), run standard extraction rules
                 extraction_blocks.push(quote! {
                     let #var_name = match <#ty as kasi_jb::prelude::FromRequest>::extract(req).await {
                         Ok(val) => val,
@@ -98,31 +95,40 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     }
 
-    // 4. GENERATED EXPANDED BLOCK GENERATION
+    // 4. GENERATE A UNIQUE INTERNAL REGISTER IDENTIFIER HELPER Function
+    let reg_helper_ident = quote::format_ident!("__register_{}", fn_ident);
+
     let expanded = quote! {
+        // Keep the developer's original function exactly as they wrote it
         #fn_vis async fn #fn_ident(#fn_inputs) #fn_output #fn_block
 
-        #[allow(non_camel_case_type)]
-        #fn_vis struct #fn_ident;
+        // Hidden registration helper function that links to ApplicationBuilder
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        #fn_vis fn #reg_helper_ident(mut builder: kasi_jb::prelude::ApplicationBuilder) -> kasi_jb::prelude::ApplicationBuilder {
+            let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
+                Box::pin(async move {
+                    #security_check_block
+                    #(#extraction_blocks)*
+                    match #fn_ident(#(#handler_arguments),*).await {
+                        Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
+                        Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
+                    }
+                })
+            });
 
-        impl kasi_jb::prelude::RegisterRoute for #fn_ident {
-            fn register_route(self, router: &mut kasi_jb::prelude::Router) {
-                let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
-                    Box::pin(async move {
-                        #security_check_block
-                        #(#extraction_blocks)*
-                        match #fn_ident(#(#handler_arguments),*).await {
-                            Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
-                            Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
-                        }
-                    })
-                });
+            let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
+            #(#doc_registrations)*
 
-                let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
-                #(#doc_registrations)*
+            // Mount straight into the internal router reference within your builder configuration
+            builder.router.add_endpoint_with_meta(
+                kasi_jb::prelude::Method::#method_ident,
+                #path_lit,
+                wrapped_handler,
+                endpoint_meta
+            );
 
-                router.add_endpoint_with_meta(kasi_jb::prelude::Method::#method_ident, #path_lit, wrapped_handler, endpoint_meta);
-            }
+            builder
         }
     };
     TokenStream::from(expanded)
