@@ -40,14 +40,14 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         let required_scopes = meta.scopes;
 
         quote! {
-            let #auth_context_var = match kasi::prelude::AuthContext::verify(&req, &[#(#required_roles),*], &[#(#required_scopes),*]).await {
+            let #auth_context_var = match kasi_jb::prelude::AuthContext::verify(&req, &[#(#required_roles),*], &[#(#required_scopes),*]).await {
                 Ok(ctx) => ctx,
-                Err(err) => return kasi::prelude::IntoResponse::into_response(err),
+                Err(err) => return kasi_jb::prelude::IntoResponse::into_response(err),
             };
         }
     } else {
         quote! {
-            let #auth_context_var: Option<kasi::prelude::AuthContext> = None;
+            let #auth_context_var: Option<kasi_jb::prelude::AuthContext> = None;
         }
     };
 
@@ -87,9 +87,9 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             } else {
                 // For all normal request components (Json, Query, Path), run standard extraction rules
                 extraction_blocks.push(quote! {
-                    let #var_name = match <#ty as kasi::prelude::FromRequest>::extract(req).await {
+                    let #var_name = match <#ty as kasi_jb::prelude::FromRequest>::extract(req).await {
                         Ok(val) => val,
-                        Err(err) => return kasi::prelude::IntoResponse::into_response(err),
+                        Err(err) => return kasi_jb::prelude::IntoResponse::into_response(err),
                     };
                 });
             }
@@ -105,23 +105,23 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         #[allow(non_camel_case_type)]
         #fn_vis struct #fn_ident;
 
-        impl kasi::prelude::RegisterRoute for #fn_ident {
-            fn register_route(self, router: &mut kasi::prelude::Router) {
-                let wrapped_handler: kasi::prelude::HandlerFn = std::sync::Arc::new(|req| {
+        impl kasi_jb::prelude::RegisterRoute for #fn_ident {
+            fn register_route(self, router: &mut kasi_jb::prelude::Router) {
+                let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
                     Box::pin(async move {
                         #security_check_block
                         #(#extraction_blocks)*
                         match #fn_ident(#(#handler_arguments),*).await {
-                            Ok(res) => kasi::prelude::IntoResponse::into_response(res),
-                            Err(err) => kasi::prelude::IntoResponse::into_response(err),
+                            Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
+                            Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
                         }
                     })
                 });
 
-                let mut endpoint_meta = kasi::prelude::EndpointMetadata::new();
+                let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
                 #(#doc_registrations)*
 
-                router.add_endpoint_with_meta(kasi::prelude::Method::#method_ident, #path_lit, wrapped_handler, endpoint_meta);
+                router.add_endpoint_with_meta(kasi_jb::prelude::Method::#method_ident, #path_lit, wrapped_handler, endpoint_meta);
             }
         }
     };
@@ -200,8 +200,8 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
             }
 
             quote! {
-                impl #impl_generics kasi::prelude::IntoResponse for #name #ty_generics #where_clause {
-                    fn into_response(self) -> kasi::prelude::Response<kasi::prelude::BoxBody> {
+                impl #impl_generics kasi_jb::prelude::IntoResponse for #name #ty_generics #where_clause {
+                    fn into_response(self) -> kasi_jb::prelude::Response<kasi_jb::prelude::BoxBody> {
                         let (status_code, title, detail) = match self {
                             #(#variant_match_arms),*
                         };
@@ -218,7 +218,7 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                             .map_err(|e| match e {})
                             .boxed();
 
-                        kasi::prelude::Response::builder()
+                        kasi_jb::prelude::Response::builder()
                             .status(status_code)
                             .header("Content-Type", "application/problem+json")
                             .body(boxed_body)
@@ -233,8 +233,8 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
         // ========================================================
         Data::Struct(_) => {
             quote! {
-                impl #impl_generics kasi::prelude::IntoResponse for #name #ty_generics #where_clause {
-                    fn into_response(self) -> kasi::prelude::Response<kasi::prelude::BoxBody> {
+                impl #impl_generics kasi_jb::prelude::IntoResponse for #name #ty_generics #where_clause {
+                    fn into_response(self) -> kasi_jb::prelude::Response<kasi_jb::prelude::BoxBody> {
                         let json_string = match serde_json::to_string(&self) {
                             Ok(s) => s,
                             Err(e) => format!(r#"{{"error": "Serialization failure: {}"}}"#, e),
@@ -244,8 +244,8 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                             .map_err(|e| match e {})
                             .boxed();
 
-                        kasi::prelude::Response::builder()
-                            .status(kasi::prelude::StatusCode::OK)
+                        kasi_jb::prelude::Response::builder()
+                            .status(kasi_jb::prelude::StatusCode::OK)
                             .header("Content-Type", "application/json")
                             .body(body)
                             .unwrap()

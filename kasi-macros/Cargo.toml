@@ -3,6 +3,7 @@ name = "kasi-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Procedural compilation attributes and polymorphic response macros for the Kasi web framework ecosystem."
 
 [lib]
 proc-macro = true

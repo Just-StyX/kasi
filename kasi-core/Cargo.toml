@@ -3,6 +3,7 @@ name = "kasi-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Procedural compilation attributes and polymorphic response macros for the Kasi web framework ecosystem."
 
 [dependencies]
 tokio.workspace = true
@@ -26,3 +27,6 @@ sea-orm = { workspace = true, optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.13.5", features = ["json"] }
+
+# [features]
+# postgres = ["dep:sea-orm", "dep:sqlx"]

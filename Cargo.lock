@@ -1800,21 +1800,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kasi"
-version = "0.1.0"
-dependencies = [
- "http",
- "hyper",
- "kasi-core",
- "kasi-macros",
- "kasi-security",
- "sea-orm",
- "serde",
- "serde_json",
- "sqlx",
-]
-
-[[package]]
 name = "kasi-core"
 version = "0.1.0"
 dependencies = [
@@ -1836,6 +1821,21 @@ dependencies = [
  "tokio",
  "tower",
  "uuid",
+]
+
+[[package]]
+name = "kasi-jb"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "hyper",
+ "kasi-core",
+ "kasi-macros",
+ "kasi-security",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sqlx",
 ]
 
 [[package]]
@@ -1862,6 +1862,7 @@ dependencies = [
  "openidconnect",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "uuid",
 ]

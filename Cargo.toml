@@ -53,7 +53,7 @@ kasi-security = { version = "0.1.0", path = "./kasi-security" }
 kasi-macros = { version = "0.1.0", path = "./kasi-macros" }
 
 [package]
-name = "kasi"
+name = "kasi-jb"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
