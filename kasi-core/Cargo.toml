@@ -3,7 +3,7 @@ name = "kasi-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Procedural compilation attributes and polymorphic response macros for the Kasi web framework ecosystem."
+description = "The core execution engine, async request extractors, and HTTP runtime routing components for the Kasi web framework."
 
 [dependencies]
 tokio.workspace = true
@@ -22,12 +22,12 @@ minijinja-embed.workspace = true
 bytes.workspace = true
 uuid.workspace = true
 
-
+# Optional engines enabled conditionally under feature propagation boundaries
 sqlx = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 
 [dev-dependencies]
-reqwest = { version = "0.13.5", features = ["json"] }
+reqwest = { version = "0.12.5", features = ["json"] } # Pro-tip: Version 0.12.x matches hyper 1.x ecosystem perfectly
 
 [features]
 postgres = ["dep:sea-orm", "dep:sqlx"]

@@ -1,8 +1,10 @@
 use http::{Request, header};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
+#[cfg(feature = "postgres")]
 use sea_orm::{DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use serde::de::DeserializeOwned;
+#[cfg(feature = "postgres")]
 use sqlx::PgPool;
 
 use crate::{BoxFuture, Error};
