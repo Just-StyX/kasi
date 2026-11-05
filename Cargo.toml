@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Justice Sam <fjaccobian@gmail.com>"]
 license = "MIT"
@@ -66,9 +66,10 @@ categories = ["web-programming::http-servers", "asynchronous"]
 readme = "README.md"
 
 [dependencies]
-kasi-core = { path = "./kasi-core" }
-kasi-macros = { path = "./kasi-macros" }
-kasi-security = { path = "./kasi-security" }
+# FIXED: Inherit from [workspace.dependencies] to capture version configurations during publishing
+kasi-core = { workspace = true }
+kasi-macros = { workspace = true }
+kasi-security = { workspace = true }
 
 # Inherit from [workspace.dependencies] to make them visible in this crate's code
 http = { workspace = true }
@@ -76,12 +77,11 @@ hyper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# You will also need these if you are re-exporting them under `#[cfg(feature = "postgres")]`
+# Activated conditionally under feature propagation boundaries
 sqlx = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 
 [features]
 default = ["postgres", "templates"]
-# Keep your internal crate feature propagation, and also activate the optional local dependencies
 postgres = ["kasi-core/postgres", "dep:sqlx", "dep:sea-orm"]
 templates = []
