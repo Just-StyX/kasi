@@ -300,6 +300,17 @@ impl ApplicationBuilder {
         self
     }
 
+    pub fn mount_endpoint(
+        mut self,
+        method: Method,
+        path: &'static str,
+        handler: HandlerFn,
+        meta: EndpointMetadata,
+    ) -> Self {
+        self.router.add_endpoint_with_meta(method, path, handler, meta);
+        self
+    }
+
     pub fn add_raw_route<F, Fut>(mut self, method: Method, path: &str, handler: F) -> Self
     where
         F: Fn(Request<BoxBody>) -> Fut + Send + Sync + 'static,
