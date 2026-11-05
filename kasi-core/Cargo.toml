@@ -1,0 +1,28 @@
+[package]
+name = "kasi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+tower.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+nom.workspace = true
+regex.workspace = true
+minijinja.workspace = true
+minijinja-embed.workspace = true
+bytes.workspace = true
+uuid.workspace = true
+
+sqlx = { workspace = true, optional = true }
+sea-orm = { workspace = true, optional = true }
+
+[dev-dependencies]
+reqwest = { version = "0.13.5", features = ["json"] }
