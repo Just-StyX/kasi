@@ -3,6 +3,7 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use sea_orm::{DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use serde::de::DeserializeOwned;
+use sqlx::PgPool;
 
 use crate::{BoxFuture, Error};
 
@@ -18,7 +19,7 @@ pub struct Path<T>(pub T);
 pub struct PathParams(pub std::collections::HashMap<String, String>);
 
 pub struct Db(pub DatabaseConnection);
-pub struct DbPool(pub sqlx::PgPool);
+pub struct DbPool(pub PgPool);
 
 impl Db {
     pub async fn transaction<F, Fut, T, E>(&self, closure: F) -> Result<T, E>

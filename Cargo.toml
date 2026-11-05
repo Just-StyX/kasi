@@ -83,5 +83,5 @@ sea-orm = { workspace = true, optional = true }
 [features]
 default = ["postgres", "templates"]
 # Keep your internal crate feature propagation, and also activate the optional local dependencies
-postgres = ["kasi-core/sqlx", "kasi-core/sea-orm", "dep:sqlx", "dep:sea-orm"]
+postgres = ["kasi-core/postgres", "dep:sqlx", "dep:sea-orm"]
 templates = []
