@@ -1,0 +1,80 @@
+name: Kasi Framework CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ] # Triggers the release deployment step when a version tag is pushed
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -------------------------------------------------------------------
+  # JOB 1: Continuous Integration (Test, Check, & Verify)
+  # -------------------------------------------------------------------
+  test-and-verify:
+    name: Build & Test Suite Execution
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Setup Secure Rust Toolchain Environment
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        components: clippy, rustfmt
+
+    - name: Enable Cargo Dependency Caching
+      uses: swatinem/rust-cache@v2
+
+    - name: Validate Source Code Formatting Alignment
+      run: cargo fmt --all -- --check
+
+    - name: Execute Workspace Static Code Analysis (Clippy)
+      run: cargo clippy --workspace --all-targets -- -D warnings
+
+    - name: Execute High-Fidelity Test Simulator Suite
+      run: cargo test --workspace --all-targets
+
+  # -------------------------------------------------------------------
+  # JOB 2: Continuous Deployment (Sequential Crates.io Publishing)
+  # -------------------------------------------------------------------
+  publish-to-crates-io:
+    name: Deploy to Crates.io
+    needs: test-and-verify
+    # This step executes ONLY if the run was triggered by pushing a git version tag
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Setup Stable Deployment Toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Publish Step 1 - kasi-core
+      run: |
+        cargo publish --manifest-path kasi-core/Cargo.toml --token ${{ secrets.CRATES_IO_TOKEN }}
+        echo "Waiting 30 seconds for Crates.io index synchronization caches..."
+        sleep 30
+
+    - name: Publish Step 2 - kasi-security
+      run: |
+        cargo publish --manifest-path kasi-security/Cargo.toml --token ${{ secrets.CRATES_IO_TOKEN }}
+        echo "Waiting 30 seconds for Crates.io index synchronization caches..."
+        sleep 30
+
+    - name: Publish Step 3 - kasi-macros
+      run: |
+        cargo publish --manifest-path kasi-macros/Cargo.toml --token ${{ secrets.CRATES_IO_TOKEN }}
+        echo "Waiting 30 seconds for Crates.io index synchronization caches..."
+        sleep 30
+
+    - name: Publish Step 4 - Top-Level Umbrella Crate (kasi)
+      run: |
+        cargo publish --manifest-path Cargo.toml --token ${{ secrets.CRATES_IO_TOKEN }}

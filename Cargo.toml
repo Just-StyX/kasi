@@ -12,7 +12,12 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Justice Sam <fjaccobian@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/Just-StyX/kasi"
+repository = "https://github.com"
+description = "An enterprise-grade, compile-time optimized async microservice framework built on Hyper 1.x and Tokio."
+documentation = "https://docs.rs"
+keywords = ["web", "async", "hyper", "framework", "microservice"]
+categories = ["web-programming::http-servers", "asynchronous"]
+readme = "README.md"
 
 [workspace.dependencies]
 tokio = { version = "1.54.1", features = ["full"] }
@@ -43,9 +48,9 @@ minijinja = { version = "3.0.5" }
 minijinja-embed = { version = "3.0.5" }
 uuid = { version = "1.29.0", features = ["v4", "serde"]}
 
-kasi-core = { path = "./kasi-core" }
-kasi-macros = { path = "./kasi-macros" }
-kasi-security = { path = "./kasi-security" }
+kasi-core = { version = "0.1.0", path = "./kasi-core" }
+kasi-security = { version = "0.1.0", path = "./kasi-security" }
+kasi-macros = { version = "0.1.0", path = "./kasi-macros" }
 
 [package]
 name = "kasi"
@@ -53,6 +58,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+description.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs"
+keywords = ["web", "async", "hyper", "framework", "microservice"]
+categories = ["web-programming::http-servers", "asynchronous"]
+readme = "README.md"
 
 [dependencies]
 kasi-core = { path = "./kasi-core" }
