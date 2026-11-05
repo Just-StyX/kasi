@@ -19,6 +19,7 @@ impl Next {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub struct InternalMiddlewareLayer {
     pub(crate) run: Arc<dyn Fn(Request<Incoming>, Next) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>, 
 }

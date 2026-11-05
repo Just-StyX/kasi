@@ -50,6 +50,7 @@ impl Router {
         self.routes.insert((method, path.to_string()), handler);
     }
 
+    #[allow(clippy::redundant_closure, clippy::useless_conversion)]
     pub fn add_route<F, Fut>(&mut self, method: Method, path: &str, handler: F) 
     where 
         F: Fn(Request<BoxBody>) -> Fut + Send + Sync + 'static,
@@ -89,6 +90,12 @@ impl Router {
     }
 }
 
+impl Default for Router {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -123,7 +130,7 @@ impl Application {
             let method_string = method.to_string().to_lowercase();
             
             paths.entry(path.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(method_string, meta.clone());
         }
 
@@ -149,7 +156,7 @@ impl Application {
         self.extensions.insert(OpenApiJsonBytes(spec_json_bytes));
 
         // Compile the visual Swagger UI HTML dashboard layout
-        let swagger_ui_html = format!(r#"
+        let swagger_ui_html = r#"
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -175,7 +182,7 @@ impl Application {
             </script>
         </body>
         </html>
-        "#);
+        "#.to_string();
         
         let swagger_bytes = bytes::Bytes::from(swagger_ui_html);
         // FIXED: Insert using our unique structural wrapper type

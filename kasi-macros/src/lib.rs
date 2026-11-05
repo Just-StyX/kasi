@@ -242,7 +242,7 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
             }
         }
         
-        Data::Union(_) => syn::Error::new_spanned(&name, "IntoResponse custom derive cannot be used on Unions").to_compile_error(),
+        Data::Union(_) => syn::Error::new_spanned(name, "IntoResponse custom derive cannot be used on Unions").to_compile_error(),
     };
 
     TokenStream::from(expanded)

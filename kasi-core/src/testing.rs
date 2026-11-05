@@ -46,7 +46,7 @@ impl TestServer {
             let service = service_fn(move |req: Request<Incoming>| {
                 let tx_mutex = std::sync::Arc::clone(&tx_mutex);
                 async move {
-                    // Safely lock the mutex and take ownership of the sender if it exists
+                    #[allow(clippy::collapsible_if)]
                     if let Ok(mut guard) = tx_mutex.lock() {
                         if let Some(sender) = guard.take() {
                             let _ = sender.send(req);

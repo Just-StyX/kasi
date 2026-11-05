@@ -3,7 +3,7 @@ name: Kasi Framework CI/CD Pipeline
 on:
   push:
     branches: [ "main" ]
-    tags: [ "v*" ] # Triggers the release deployment step when a version tag is pushed
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -11,17 +11,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # -------------------------------------------------------------------
-  # JOB 1: Continuous Integration (Test, Check, & Verify)
-  # -------------------------------------------------------------------
   test-and-verify:
     name: Build & Test Suite Execution
     runs-on: ubuntu-latest
     
     steps:
+    # 1. FIXED: Upgraded from @v4 to @v5 to eliminate the Node.js deprecation warning
     - name: Checkout Source Code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
+    # 2. FIXED: Upgraded from @v2 to @v4 to target Node.js 24 natively
     - name: Setup Secure Rust Toolchain Environment
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -40,19 +39,15 @@ jobs:
     - name: Execute High-Fidelity Test Simulator Suite
       run: cargo test --workspace --all-targets
 
-  # -------------------------------------------------------------------
-  # JOB 2: Continuous Deployment (Sequential Crates.io Publishing)
-  # -------------------------------------------------------------------
   publish-to-crates-io:
     name: Deploy to Crates.io
     needs: test-and-verify
-    # This step executes ONLY if the run was triggered by pushing a git version tag
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout Source Code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup Stable Deployment Toolchain
       uses: dtolnay/rust-toolchain@stable
