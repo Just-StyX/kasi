@@ -1,9 +1,15 @@
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc, future::Future};
 
 use http::{Method, Request, Response};
 use hyper::body::Incoming;
 
 use crate::{BoxBody, BoxFuture, Error, HandlerFn, Router, error::RequestContext};
+
+pub type MiddleChain = Arc<dyn Fn(Request<BoxBody>) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send>> + Send + Sync>;
+
+pub trait Middleware: Send + Sync + 'static {
+    fn handle<'a>(&'a self, req: Request<BoxBody>, next: MiddleChain) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'a>>;
+}
 
 pub trait RegisterRoute {
     fn register_route(self, router: &mut Router);

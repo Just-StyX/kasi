@@ -13,6 +13,7 @@ pub use hyper_util::rt::TokioIo;
 pub use hyper_util::{rt::TokioExecutor, server::conn::auto};
 pub use tokio::net::TcpListener;
 
+use crate::middleware::Middleware;
 use crate::openapi::{EndpointMetadata, InfoSpec, OpenApiSpec};
 use crate::{
     error::{Error, RequestContext},
@@ -53,6 +54,10 @@ impl Router {
 
     pub(crate) fn add_raw_handler(&mut self, method: Method, path: &str, handler: HandlerFn) {
         self.routes.insert((method, path.to_string()), handler);
+    }
+
+    pub fn wrap_handlers() {
+    
     }
 
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
@@ -279,8 +284,9 @@ impl Application {
 
 pub struct ApplicationBuilder {
     config: Config,
-    router: Router,
+    pub(crate) router: Router,
     extensions: Extensions,
+    middleware: Vec<Arc<dyn Middleware>>
 }
 
 impl ApplicationBuilder {
@@ -289,6 +295,7 @@ impl ApplicationBuilder {
             config,
             router: Router::new(),
             extensions: Extensions::new(),
+            middleware: Vec::new(),
         }
     }
 
@@ -321,9 +328,12 @@ impl ApplicationBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<Application, Error> {
+    pub async fn build(self) -> Result<Application, Box<dyn std::error::Error + Send + Sync>> {
+        let mut router = self.router;
+        let middleware_chain = self.middleware;
+        router.wrap_handles_with_middleware(middleware_chain);
         Ok(Application {
-            router: self.router,
+            router: router,
             config: self.config,
             extensions: self.extensions,
         })
@@ -358,6 +368,11 @@ impl ApplicationBuilder {
             }
             self.router.add_raw_handler(method, &path, active_chain);
         }
+        self
+    }
+
+    pub fn middleware<M: Middleware>(mut self, middleware: M) -> Self {
+        self.middleware.push(Arc::new(middleware));
         self
     }
 }
