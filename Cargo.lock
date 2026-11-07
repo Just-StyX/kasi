@@ -1728,15 +1728,19 @@ dependencies = [
 name = "kasi-jb"
 version = "0.1.8"
 dependencies = [
+ "bytes",
  "http",
+ "http-body-util",
  "hyper",
  "kasi-core",
  "kasi-macros",
  "kasi-security",
+ "reqwest",
  "sea-orm",
  "serde",
  "serde_json",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

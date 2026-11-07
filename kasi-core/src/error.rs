@@ -17,6 +17,12 @@ pub enum Error {
     Forbidden(String),
 }
 
+pub trait Validate {
+    /// Evaluates structural or logical constraints on a type.
+    /// Returns a structured ValidationError matrix or Ok(()) if completely compliant.
+    fn validate(&self) -> Result<(), Error>;
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestContext {
     pub(crate) uri_path: String,

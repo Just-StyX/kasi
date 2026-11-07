@@ -1,5 +1,5 @@
 use http::{Request, header};
-use hyper::body::Incoming;
+use kasi_core::BoxBody;
 use kasi_core::{error::Error, extract::FromRequest};
 use openidconnect::IssuerUrl;
 use openidconnect::JsonWebKey;
@@ -83,10 +83,6 @@ impl OidcConfig {
         issuer_url: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let issuer = IssuerUrl::new(issuer_url.to_string())?;
-
-        // 1. Initialize a standard asynchronous reqwest HTTP client instance
-        // Note: For framework-wide deployment safety, it is recommended to set
-        // redirect policy to none to prevent potential SSRF vulnerabilities.
         let http_client = openidconnect::reqwest::ClientBuilder::new()
             .redirect(openidconnect::reqwest::redirect::Policy::none())
             .build()?;
@@ -101,14 +97,19 @@ impl OidcConfig {
 }
 
 impl FromRequest for AuthContext {
-    fn extract(req: Request<Incoming>) -> kasi_core::BoxFuture<'static, Result<Self, Error>> {
-        Box::pin(async move { Self::verify(&req, &[], &[]).await })
+    fn extract(req: Request<BoxBody>) -> kasi_core::BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+        Box::pin(async move {
+            let auth_ctx = Self::verify(&req, &[], &[]).await?;
+            
+            Ok((auth_ctx, req))
+        })
     }
 }
 
+
 impl AuthContext {
     pub async fn password_verify(
-        req: &Request<Incoming>,
+        req: &Request<BoxBody>, // FIX: Changed from &Request<Incoming>
         required_roles: &[&str],
         required_scopes: &[&str],
     ) -> Result<Self, Error> {
@@ -128,7 +129,6 @@ impl AuthContext {
 
         let token_string = &auth_header[7..];
 
-        // ( in production we have to us openidconnect or jsonwebtoken libraries)
         let claims = MockJwtEngine::decode_and_verify(token_string)
             .map_err(|e| Error::Unauthorized(format!("Invalid access token signature: {}", e)))?;
 
@@ -159,11 +159,11 @@ impl AuthContext {
     }
 
     pub async fn verify(
-        req: &Request<Incoming>,
+        req: &Request<BoxBody>, // FIX: Changed from &Request<Incoming>
         required_roles: &[&str],
         required_scopes: &[&str],
     ) -> Result<Self, Error> {
-        // 1. Get OidcConfig from Request Extensions container (Injected at server application startup layer)
+        // 1. Get OidcConfig from Request Extensions container
         let oidc_config = req
             .extensions()
             .get::<std::sync::Arc<OidcConfig>>()
@@ -189,10 +189,7 @@ impl AuthContext {
         }
         let token_string = &auth_header[7..];
 
-        // 3. SECURE LOCAL DECODING & SIGNATURE VALIDATION VIA OPENIDCONNECT CRATE
-        // This parses the JWT headers, searches for the corresponding Key ID (kid) in Keycloak's cached JWKS,
-        // verifies the cryptographic signature locally, and guards against token expiration / wrong issuer claims.
-        // For custom token formats, standard JWT validation utilities handle parsing similarly.
+        // 3. SECURE LOCAL DECODING & SIGNATURE VALIDATION
         let structural_jwt = jsonwebtoken::decode_header(token_string)
             .map_err(|e| Error::Unauthorized(format!("Malformed JWT Header structure: {}", e)))?;
 
@@ -231,7 +228,6 @@ impl AuthContext {
 
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
         validation.set_issuer(&[&oidc_config.expected_issuer]);
-        // Set dynamic audience bounds if your App requires strict application validation checks
         validation.validate_aud = false;
 
         let token_data =
@@ -245,7 +241,7 @@ impl AuthContext {
 
         let claims = token_data.claims;
 
-        // 4. Transform parsed scope string array ("read:profile write:system") into a vector
+        // 4. Transform parsed scope string array into a vector
         let claims_scopes: Vec<String> = claims
             .scope
             .split_whitespace()
@@ -273,7 +269,7 @@ impl AuthContext {
         }
 
         // 6. Map to clean platform types
-        let parsed_uuid = uuid::Uuid::parse_str(&claims.sub).unwrap_or_else(|_| uuid::Uuid::nil()); // Handle alternative standard format strings securely
+        let parsed_uuid = uuid::Uuid::parse_str(&claims.sub).unwrap_or_else(|_| uuid::Uuid::nil());
 
         Ok(AuthContext {
             user_id: parsed_uuid,
@@ -300,3 +296,4 @@ impl AuthContext {
         self.scopes.iter().any(|s| s == scope)
     }
 }
+

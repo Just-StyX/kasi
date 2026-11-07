@@ -39,13 +39,12 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         let required_scopes = meta.scopes;
 
         quote! {
-            let #auth_context_var = match kasi_jb::prelude::AuthContext::verify(&req, &[#(#required_roles),*], &[#(#required_scopes),*]).await {
+            let #auth_context_var = match kasi_jb::prelude::AuthContext::verify(&__active_req, &[#(#required_roles),*], &[#(#required_scopes),*]).await {
                 Ok(ctx) => ctx,
                 Err(err) => return kasi_jb::prelude::IntoResponse::into_response(err),
             };
         }
     } else {
-        // Fix: Use an empty AuthContext profile instead of an Option variant to avoid mismatch errors
         quote! {
             let #auth_context_var = kasi_jb::prelude::AuthContext::default_anonymous();
         }
@@ -67,7 +66,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
-    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES
+    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES (Aligned to Request<BoxBody> threading)
     let mut extraction_blocks = Vec::new();
     let mut handler_arguments = Vec::new();
 
@@ -83,11 +82,13 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                     let #var_name = #auth_context_var.clone();
                 });
             } else {
+                // Thread ownership dynamically across execution parameters
                 extraction_blocks.push(quote! {
-                    let #var_name = match <#ty as kasi_jb::prelude::FromRequest>::extract(req).await {
-                        Ok(val) => val,
+                    let (#var_name, __updated_req) = match <#ty as kasi_jb::prelude::FromRequest>::extract(__active_req).await {
+                        Ok(tuple_res) => tuple_res,
                         Err(err) => return kasi_jb::prelude::IntoResponse::into_response(err),
                     };
+                    __active_req = __updated_req;
                 });
             }
 
@@ -95,7 +96,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     }
 
-    // 4. GENERATE A UNIQUE INTERNAL REGISTER IDENTIFIER HELPER Function
+    // 4. GENERATE A UNIQUE INTERNAL REGISTER IDENTIFIER HELPER FUNCTION
     let reg_helper_ident = quote::format_ident!("__register_{}", fn_ident);
 
     let expanded = quote! {
@@ -105,11 +106,17 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         // Hidden registration helper function that links to ApplicationBuilder
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        #fn_vis fn #reg_helper_ident(mut builder: kasi_jb::prelude::ApplicationBuilder) -> kasi_jb::prelude::ApplicationBuilder {
+        #fn_vis fn #reg_helper_ident(builder: kasi_jb::prelude::ApplicationBuilder) -> kasi_jb::prelude::ApplicationBuilder {
             let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
                 Box::pin(async move {
+                    // Type-erase the hyper Incoming request immediately before routing it through security and parameters
+                    let (parts, incoming_body) = req.into_parts();
+                    let boxed_incoming_body = http_body_util::BodyExt::map_err(incoming_body, |e| hyper::Error::from(e)).boxed();
+                    let mut __active_req = http::Request::from_parts(parts, boxed_incoming_body);
+
                     #security_check_block
                     #(#extraction_blocks)*
+
                     match #fn_ident(#(#handler_arguments),*).await {
                         Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
                         Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
@@ -120,22 +127,12 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
             #(#doc_registrations)*
 
-            // Mount straight into the internal router reference within your builder configuration
-            // builder.router.add_endpoint_with_meta(
-            //     kasi_jb::prelude::Method::#method_ident,
-            //     #path_lit,
-            //     wrapped_handler,
-            //     endpoint_meta
-            // );
-
             builder.mount_endpoint(
                 kasi_jb::prelude::Method::#method_ident,
                 #path_lit,
                 wrapped_handler,
                 endpoint_meta
             )
-
-            // builder
         }
     };
     TokenStream::from(expanded)
@@ -315,6 +312,126 @@ pub fn main(_args: TokenStream, input: TokenStream) -> TokenStream {
                 .expect("Failed to initialize the core framework Tokio async runtime environment.");
 
             runtime.block_on(__inner_async_main())
+        }
+    };
+    TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(Validate, attributes(validate))]
+pub fn derive_validate(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let mut checks = Vec::new();
+    let mut regex_statics = Vec::new();
+
+    if let Data::Struct(data_struct) = &input.data {
+        if let Fields::Named(fields) = &data_struct.fields {
+            for field in &fields.named {
+                let field_ident = &field.ident;
+                let field_str = field_ident.as_ref().unwrap().to_string();
+
+                for attr in &field.attrs {
+                    if attr.path().is_ident("validate") {
+                        let _ = attr.parse_nested_meta(|meta| {
+                            // 1. Email check
+                            if meta.path.is_ident("email") {
+                                checks.push(quote! {
+                                    if !self.#field_ident.contains('@') {
+                                        return Err(Error::BadRequest(format!(
+                                            "Validation failure on field '{}': Invalid email address format.", #field_str
+                                        )));
+                                    }
+                                });
+                            } 
+                            // 2. Length check
+                            else if meta.path.is_ident("min_len") {
+                                let expr: syn::Expr = meta.value()?.parse()?;
+                                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) = expr {
+                                    let min: usize = i.base10_parse().unwrap_or(0);
+                                    checks.push(quote! {
+                                        if self.#field_ident.len() < #min {
+                                            return Err(Error::BadRequest(format!(
+                                                "Validation failure on field '{}': Length must be at least {} characters.", #field_str, #min
+                                            )));
+                                        }
+                                    });
+                                }
+                            }
+                            // 3. Numeric range check (e.g. range(min = 18, max = 99))
+                            else if meta.path.is_ident("range") {
+                                let mut min_val: Option<syn::Expr> = None;
+                                let mut max_val: Option<syn::Expr> = None;
+                                
+                                meta.parse_nested_meta(|inner| {
+                                    if inner.path.is_ident("min") {
+                                        min_val = Some(inner.value()?.parse()?);
+                                    } else if inner.path.is_ident("max") {
+                                        max_val = Some(inner.value()?.parse()?);
+                                    }
+                                    Ok(())
+                                })?;
+
+                                if let Some(min) = min_val {
+                                    checks.push(quote! {
+                                        if (self.#field_ident as f64) < (#min as f64) {
+                                            return Err(Error::BadRequest(format!(
+                                                "Validation failure on field '{}': Value cannot be less than {}.", #field_str, #min
+                                            )));
+                                        }
+                                    });
+                                }
+                                if let Some(max) = max_val {
+                                    checks.push(quote! {
+                                        if (self.#field_ident as f64) > (#max as f64) {
+                                            return Err(Error::BadRequest(format!(
+                                                "Validation failure on field '{}': Value cannot be greater than {}.", #field_str, #max
+                                            )));
+                                        }
+                                    });
+                                }
+                            }
+                            // 4. Regex validation rules (e.g. regex = "^[a-zA-Z0-9]+$")
+                            else if meta.path.is_ident("regex") {
+                                let expr: syn::Expr = meta.value()?.parse()?;
+                                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = expr {
+                                    let pattern = s.value();
+                                    let static_regex_ident = quote::format_ident!("__REGEX_{}", field_str.to_uppercase());
+                                    
+                                    // Generate a lazy compiled global regex instance to avoid runtime parsing overhead
+                                    regex_statics.push(quote! {
+                                        static #static_regex_ident: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+                                    });
+
+                                    checks.push(quote! {
+                                        let re = #static_regex_ident.get_or_init(|| {
+                                            regex::Regex::new(#pattern).expect("Invalid macro-compiled regex pattern declaration spec.")
+                                        });
+                                        if !re.is_match(&self.#field_ident.to_string()) {
+                                            return Err(Error::BadRequest(format!(
+                                                "Validation failure on field '{}': String format does not match required layout constraints.", #field_str
+                                            )));
+                                        }
+                                    });
+                                }
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let expanded = quote! {
+        #(#regex_statics)*
+
+        impl #impl_generics Validate for #name #ty_generics #where_clause {
+            fn validate(&self) -> Result<(), Error> {
+                #(#checks)*
+                Ok(())
+            }
         }
     };
     TokenStream::from(expanded)
