@@ -4,6 +4,21 @@ Kasi is an enterprise-grade, compile-time optimized microservice framework for m
 
 ---
 
+## ⚡ Architecture & Milestones Summary
+
+We have engineered and stabilized a highly modular web engine designed for low-latency, thread-safe microservice patterns. By shifting constraints from runtime checks to compile-time analysis and strict type design, Kasi completely eliminates typical runtime type mismatches and closure lifetime escape bugs.
+
+### 🌟 Core Framework Pillars
+
+* **Unified Stream Domain:** Decoupled the microservice architecture from Hyper's private, sealed stream types by standardizing the request-response lifecycle entirely on a type-erased `Request<BoxBody>` abstraction layer.
+* **Sequential Ownership-Threading Extractors:** Developed a by-value ownership-threading pattern (`Request<BoxBody> -> (Self, Request<BoxBody>)`) for parameter extraction. This allows endpoint handlers to extract multiple inputs (e.g., an auth profile, a database connection, and a payload validation check) sequentially without triggering "use of moved value" compiler crashes.
+* **Zero-Allocation Global Middleware:** Refactored the `Middleware` execution pipeline to utilize explicit `'static` future returns. This allows the Tokio runtime thread pool to schedule work without generic lifetime reference friction.
+* **Hierarchical Route Nesting:** Enabled clean grouping and prefixing via `Module::nest_with_docs`, ensuring parent middleware layers cascade into nested scopes without cross-contamination.
+* **Advanced Multi-Strategy Regex Matcher:** Engineered a routing system that compiles parametric path variables and explicit constraints (e.g., `{id:\\d+}`) into organized, compiled regular expressions at server boot, providing a fast route resolution gate.
+* **Intelligent JSON Path Extractor:** Upgraded the `Path<T>` parsing mechanics to build in-memory JSON Value nodes dynamically, allowing special characters like hyphens (`-`) or slashes to bypass strict URL-encoded form constraints, supporting both custom struct parameters and raw primitives (`u64`, `String`) simultaneously.
+
+---
+
 ## Architecture Overview
 
 Kasi is organized as a decoupled, multi-crate Cargo Workspace to ensure high cohesion, low compilation coupling, and clean division of architectural boundaries.
@@ -30,7 +45,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.10"
 edition = "2024"
 authors = ["Justice Sam <fjaccobian@gmail.com>"]
 license = "MIT"
@@ -250,6 +265,173 @@ mod tests {
         .await;
         // Compile standard assert configurations
         assert_eq!(http_response.status(), StatusCode::UNAUTHORIZED); // Fails correctly due to missing credentials header!
+    }
+}
+```
+
+---
+
+## 🛠 Features & Use Cases Deep Dive
+
+### 1. Advanced Declarative Struct Validation & Primitives
+Validate incoming network data directly at the parameter level. By implementing a custom `#[derive(Validate)]` macro that matches structural bounds and compiles regex targets to lazy global slots, incorrect formats are safely dropped with an RFC 7807 problem details response before the handler execution task can allocate unnecessary resources.
+
+```rust
+use kasi_jb::prelude::*;
+use serde::Deserialize;
+
+#[derive(Deserialize, Validate)]
+pub struct AccountUpdate {
+    // Requires a safe string with minimum length of 3 matching alpha-numeric parameters
+    #[validate(min_len = 3, regex = "^[a-z0-9_-]+\$")]
+    pub username: String,
+    
+    // Automatic numeric range clamping boundaries
+    #[validate(range(min = 18, max = 120))]
+    pub age: u8,
+}
+
+#[endpoint(POST, "/accounts/modify")]
+async fn modify_account(
+    ValidatedJson(payload): ValidatedJson<AccountUpdate>
+) -> Result<&'static str, Error> {
+    println!("Processing payload safely for user: {}", payload.username);
+    Ok("Account changes executed cleanly.")
+}
+```
+
+### 2. High-Performance URL-Safe Regex Routing
+Enforce path argument type constraints natively at the routing engine edge. Requests that fail to match the custom regex boundaries (such as a string instead of digits) drop out instantly into a clean `404 Not Found` without contaminating backend business scopes.
+
+```rust
+use kasi_jb::prelude::*;
+
+// Matches exactly: GET /items/XYZ-98765
+// Bypasses and emits 404 on: GET /items/abc-123 or GET /items/XYZ-
+#[endpoint(GET, "/items/{sku:[A-Z]{3}-\\d+}")]
+async fn get_inventory_item(Path(sku): Path<String>) -> Result<JsonValue, Error> {
+    Ok(json!({
+        "sku_serial": sku,
+        "active_monitored": true
+    }))
+}
+
+// Matches numeric IDs only: GET /users/45231
+#[endpoint(GET, "/users/{id:\\d+}")]
+async fn get_user_profile(Path(id): Path<u64>) -> Result<JsonValue, Error> {
+    Ok(json!({ "user_id": id, "permissions": ["User"] }))
+}
+```
+
+### 3. Automatic Atomic Database Transaction Extractor
+Write code that handles transactions without manual rollback boilerplate. The `Tx` extractor automatically opens a database transaction boundary before your function runs. Success (`Ok`) triggers an automatic `COMMIT`, while an intercepted failure (`Err`) issues an atomic `ROLLBACK` instantly.
+
+```rust
+use kasi_jb::prelude::*;
+use sea_orm::ActiveModelTrait;
+
+#[endpoint(POST, "/checkout")]
+async fn finalize_checkout(
+    mut tx: Tx, // Automatically begins transactional boundaries on execution start
+    ValidatedJson(order): ValidatedJson<OrderPayload>
+) -> Result<&'static str, Error> {
+    
+    // Execute isolated mutation sets against the active database transaction context
+    let record = invoice::ActiveModel { .. };
+    record.insert(&tx.0).await.map_err(|e| Error::Internal(e.to_string()))?;
+
+    if order.amount > 50000 {
+        // Triggering an Err variant immediately commands an automatic rollback across all inserts
+        return Err(Error::BadRequest("Exceeded maximum unverified batch transaction limit.".into()));
+    }
+
+    // Returning an Ok status cleanly issues an automatic COMMIT to the storage pool
+    Ok("Checkout process locked and synchronized successfully.")
+}
+```
+
+### 4. Hierarchical Route Tree Scope Nesting & Middleware Isolation
+Compose massive API networks cleanly while maintaining strict middleware sub-tree boundaries. Parent-level middleware (like an authentication gate or audit logger) can be applied to an entire nested module group, protecting those endpoints without leaking headers or logic into parallel root scopes.
+
+```rust
+use kasi_jb::prelude::*;
+
+#[main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 1. Build an isolated subsystem child module with specialized routing paths
+    let inventory_api = Module::new("/inventory")
+        .add_endpoint_with_meta(
+            Method::POST, 
+            "/restock", 
+            __register_restock_endpoint,
+            EndpointMetadata::new().with_summary("Restock warehouse units")
+        );
+
+    // 2. Build a top-level route tree group, attach a middleware layer, and nest children
+    // Paths automatically merge and compile down natively to: /api/v1/inventory/restock
+    let api_cluster = Module::new("/api/v1")
+        .wrap(from_fn(oauth2_jwt_auth_guard)) // Applies strictly to this tree branch
+        .nest_with_docs(inventory_api);
+
+    let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
+        .register_module(api_cluster) // Ingests handlers, custom middleware, and OpenAPI specs at once
+        .build()
+        .await?;
+
+    app.serve().await?;
+    Ok(())
+}
+```
+
+### 5. Automated OpenAPI 3.1.0 Specs & Visual Swagger Dashboards
+Kasi reads macro attributes compiled during builds and synthesizes an OpenAPI documentation schema at startup. The framework provisions static handlers internally to serve an interactive graphical dashboard out of the box, without requiring heavy third-party code generation suites.
+
+```rust
+// Access your microservice metadata dynamically via standard HTTP routing lookups:
+// 🗺 JSON OpenApi Document Schema: http://127.0.0
+// 📊 Graphical Interactive Swagger UI: http://127.0.0
+```
+
+---
+
+## 🔬 Verified Integration Testing Infrastructure
+
+To guarantee code durability across asynchronous worker threads, Kasi provides an eager socket-binding flow (`Application::bind_listener`) specifically designed for deterministic testing. By passing `port: 0` inside tests, the framework instructs the operating system kernel to bind an anonymous unallocated port, resolving local address strings accurately before executing client assertions.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use kasi_jb::prelude::*;
+    use http::StatusCode;
+
+    #[tokio::test]
+    async fn test_end_to_end_validation_and_regex_routing() {
+        // A. Setup server context on an isolated ephemeral kernel socket
+        let mut app = Application::builder(Config { host: "127.0.0.1".into(), port: 0 })
+            .route(__register_get_inventory_item)
+            .build()
+            .await
+            .unwrap();
+
+        // B. Bind listener eagerly to fetch true active runtime port information
+        let listener = app.bind_listener().await.unwrap();
+        let target_addr = app.local_addr();
+
+        // C. Spawn server loop on a background task worker
+        tokio::task::spawn(async move {
+            let _ = app.serve_on_listener(listener).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // D. Dispatch a request through reqwest client pipelines
+        let client = reqwest::Client::new();
+        let response = client.get(&format!("http://{}/items/ABC-12345", target_addr))
+            .send()
+            .await
+            .unwrap();
+
+        // E. Confirm that regex path match and validation processing execute flawlessly!
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
 ```
