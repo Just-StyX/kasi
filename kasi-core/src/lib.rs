@@ -57,80 +57,81 @@ impl Router {
     }
 
     // Inside `impl Router` within framework-core/src/lib.rs
-    
-    pub fn wrap_handles_with_middleware(&mut self, middleware_chain: Vec<std::sync::Arc<dyn Middleware>>) {
+
+    pub fn wrap_handles_with_middleware(
+        &mut self,
+        middleware_chain: Vec<std::sync::Arc<dyn Middleware>>,
+    ) {
         if middleware_chain.is_empty() {
             return;
         }
-    
+
         let original_routes = std::mem::take(&mut self.routes);
-    
+
         for ((method, path), base_handler) in original_routes {
-            let incoming_request_cell = std::sync::Arc::new(tokio::sync::Mutex::new(None::<http::Request<hyper::body::Incoming>>));
-    
+            let incoming_request_cell = std::sync::Arc::new(tokio::sync::Mutex::new(
+                None::<http::Request<hyper::body::Incoming>>,
+            ));
+
             let cell_for_chain = incoming_request_cell.clone();
             let handler_clone = base_handler.clone();
-    
+
             let mut current_chain: MiddleChain = std::sync::Arc::new(move |_req_box| {
                 let cell = cell_for_chain.clone();
                 let handler = handler_clone.clone();
-    
+
                 Box::pin(async move {
                     let mut guard = cell.lock().await;
                     if let Some(native_req) = guard.take() {
                         handler(native_req).await
                     } else {
-                        let error_bytes = bytes::Bytes::from("Internal Engine Deserialization Error");
+                        let error_bytes =
+                            bytes::Bytes::from("Internal Engine Deserialization Error");
                         let body = http_body_util::Full::new(error_bytes)
                             .map_err(|e| match e {})
                             .boxed();
-    
-                        http::Response::builder()
-                            .status(500)
-                            .body(body)
-                            .unwrap()
+
+                        http::Response::builder().status(500).body(body).unwrap()
                     }
                 })
             });
-    
+
             for middleware_node in middleware_chain.iter().rev() {
                 let active_mw = middleware_node.clone();
                 let next_target = current_chain.clone();
-    
-                current_chain = std::sync::Arc::new(move |req| {
-                    active_mw.handle(req, next_target.clone())
-                });
+
+                current_chain =
+                    std::sync::Arc::new(move |req| active_mw.handle(req, next_target.clone()));
             }
-    
+
             let cell_for_handler = incoming_request_cell.clone();
             let final_middleware_chain = current_chain;
-            
+
             let finalized_handler: HandlerFn = std::sync::Arc::new(move |req_incoming| {
                 let cell = cell_for_handler.clone();
                 let chain = final_middleware_chain.clone();
-    
+
                 Box::pin(async move {
                     let (parts, body) = req_incoming.into_parts();
-                    
+
                     let original_incoming_req = http::Request::from_parts(parts.clone(), body);
                     {
                         let mut guard = cell.lock().await;
                         *guard = Some(original_incoming_req);
                     }
-    
+
                     let blank_body = http_body_util::Empty::<bytes::Bytes>::new()
                         .map_err(|e| match e {})
                         .boxed();
                     let middleware_req = http::Request::from_parts(parts, blank_body);
-    
+
                     chain(middleware_req).await
                 })
             });
-    
+
             self.routes.insert((method, path), finalized_handler);
         }
     }
-
 
     #[allow(clippy::redundant_closure, clippy::useless_conversion)]
     pub fn add_route<F, Fut>(&mut self, method: Method, path: &str, handler: F)
@@ -162,29 +163,32 @@ impl Router {
             .insert((method.clone(), path.to_string()), handler);
         self.metadata.insert((method, path.to_string()), meta);
     }
-    
+
     pub async fn dispatch(&self, mut req: Request<hyper::body::Incoming>) -> Response<BoxBody> {
         let method = req.method().clone();
         let req_path = req.uri().path();
         let req_segments: Vec<&str> = req_path.split('/').filter(|s| !s.is_empty()).collect();
-        
+
         let mut matched_handler = None;
         let mut captured_params = std::collections::HashMap::new();
-        
+
         for ((route_method, route_template), handler) in &self.routes {
             if *route_method != method {
                 continue;
             }
-            
-            let template_segments: Vec<&str> = route_template.split('/').filter(|s| !s.is_empty()).collect();
-            
+
+            let template_segments: Vec<&str> = route_template
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
+
             if template_segments.len() != req_segments.len() {
                 continue;
             }
-            
+
             let mut is_match = true;
             let mut local_captures = std::collections::HashMap::new();
-            
+
             for (tmpl_seg, req_seg) in template_segments.iter().zip(req_segments.iter()) {
                 if tmpl_seg.starts_with(':') {
                     // Strip the colon (e.g., ":id" -> "id") and store the variable capture
@@ -195,16 +199,16 @@ impl Router {
                     break;
                 }
             }
-            
+
             if is_match {
                 matched_handler = Some(handler);
                 captured_params = local_captures;
                 break;
             }
         }
-    
+
         let context_frame = RequestContext::from_request(&req);
-    
+
         if let Some(handler) = matched_handler {
             // Safely pass the populated path variable map to the request extensions!
             req.extensions_mut().insert(PathParams(captured_params));
@@ -214,7 +218,6 @@ impl Router {
                 .into_response_with_context(&context_frame)
         }
     }
-
 }
 
 impl Default for Router {
@@ -276,22 +279,22 @@ pub struct Application {
 //         // 1. Bind to the requested address pattern
 //         let initial_addr = format!("{}:{}", self.config.host, self.config.port);
 //         let listener = TcpListener::bind(&initial_addr).await?;
-    
+
 //         // FIX: Extract the actual socket assigned by the OS kernel and update the config state.
 //         // This ensures `self.generate_openapi_spec` and `app.local_addr()` match perfectly!
 //         let bound_addr = listener.local_addr()?;
 //         self.config.port = bound_addr.port();
-    
+
 //         // Re-format the address string using the true runtime port
 //         let addr = format!("{}:{}", self.config.host, self.config.port);
-    
+
 //         // Compile the specification document based on macro compile data
 //         let spec = self.generate_openapi_spec("Kasi Microservice Engine", "1.0.0");
 //         let spec_json_bytes = bytes::Bytes::from(serde_json::to_string_pretty(&spec).unwrap());
-    
+
 //         // FIXED: Insert using our unique structural wrapper type
 //         self.extensions.insert(OpenApiJsonBytes(spec_json_bytes));
-    
+
 //         // Compile the visual Swagger UI HTML dashboard layout
 //         let swagger_ui_html = r#"
 //         <!DOCTYPE html>
@@ -321,10 +324,10 @@ pub struct Application {
 //         </html>
 //         "#
 //         .to_string();
-    
+
 //         let swagger_bytes = bytes::Bytes::from(swagger_ui_html);
 //         self.extensions.insert(SwaggerHtmlBytes(swagger_bytes));
-    
+
 //         println!("Kasi server listening natively on http://{}", addr);
 //         println!(
 //             "OpenAPI JSON documentation structure available at http://{}/openapi.json",
@@ -334,23 +337,23 @@ pub struct Application {
 //             "Graphical Swagger UI Dashboard active at http://{}/docs",
 //             addr
 //         );
-    
+
 //         let shared_router = Arc::new(self.router);
 //         let shared_extensions = Arc::new(self.extensions);
-    
+
 //         loop {
 //             let (stream, _remote_addr) = listener.accept().await?;
 //             let io = TokioIo::new(stream);
 //             let router_clone = shared_router.clone();
 //             let extensions_clone = shared_extensions.clone();
-    
+
 //             tokio::task::spawn(async move {
 //                 let service = service_fn(move |mut req: Request<Incoming>| {
 //                     let router = router_clone.clone();
 //                     let extensions = extensions_clone.clone();
 //                     async move {
 //                         req.extensions_mut().extend(extensions.as_ref().clone());
-    
+
 //                         // Intercept JSON Spec calls
 //                         if req.uri().path() == "/openapi.json" && req.method() == Method::GET {
 //                             if let Some(wrapped_json) = extensions.get::<OpenApiJsonBytes>() {
@@ -366,7 +369,7 @@ pub struct Application {
 //                                 );
 //                             }
 //                         }
-    
+
 //                         // Intercept Graphical Swagger UI Dashboard calls
 //                         if req.uri().path() == "/docs" && req.method() == Method::GET {
 //                             if let Some(wrapped_html) = extensions.get::<SwaggerHtmlBytes>() {
@@ -382,7 +385,7 @@ pub struct Application {
 //                                     );
 //                             }
 //                         }
-    
+
 //                         Ok::<_, hyper::Error>(router.dispatch(req).await)
 //                     }
 //                 });
@@ -392,7 +395,6 @@ pub struct Application {
 //             });
 //         }
 //     }
-
 
 //     pub fn local_addr(&self) -> String {
 //         format!("{}:{}", self.config.host, self.config.port)
@@ -448,7 +450,9 @@ impl Application {
 
     /// Eagerly binds the TCP Socket listener layout to the current OS context frame.
     /// This immediately replaces a dynamic proxy configuration (port: 0) with the actual resolved port.
-    pub async fn bind_listener(&mut self) -> Result<TcpListener, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn bind_listener(
+        &mut self,
+    ) -> Result<TcpListener, Box<dyn std::error::Error + Send + Sync>> {
         let initial_addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&initial_addr).await?;
 
@@ -566,7 +570,7 @@ impl Application {
                         Ok::<_, hyper::Error>(router.dispatch(req).await)
                     }
                 });
-                
+
                 let _ = auto::Builder::new(TokioExecutor::new())
                     .serve_connection(io, service)
                     .await;
@@ -585,7 +589,7 @@ pub struct ApplicationBuilder {
     config: Config,
     pub(crate) router: Router,
     extensions: Extensions,
-    middleware: Vec<Arc<dyn Middleware>>
+    middleware: Vec<Arc<dyn Middleware>>,
 }
 
 impl ApplicationBuilder {
@@ -647,15 +651,15 @@ impl ApplicationBuilder {
         for ((method, path), meta) in module.metadata {
             self.router.metadata.insert((method, path), meta);
         }
-    
+
         // 2. Loop through endpoints, wrap them with middleware, and mount them once
         for (method, path, base_handler) in module.endpoints {
             let mut active_chain: HandlerFn = base_handler;
-            
+
             for middleware_layer in module.middleware.iter().rev() {
                 let current_layer = middleware_layer.run.clone();
                 let next_inner_handler = active_chain.clone();
-    
+
                 active_chain = Arc::new(move |req| {
                     let inner = next_inner_handler.clone();
                     let next_node = Next {
@@ -664,14 +668,13 @@ impl ApplicationBuilder {
                     current_layer(req, next_node)
                 });
             }
-            
+
             // This adds the fully wrapped middleware execution chain into the routing matrix!
             self.router.add_raw_handler(method, &path, active_chain);
         }
-    
+
         self
     }
-
 
     pub fn middleware<M: Middleware>(mut self, middleware: M) -> Self {
         self.middleware.push(Arc::new(middleware));

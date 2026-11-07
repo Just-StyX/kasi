@@ -97,15 +97,16 @@ impl OidcConfig {
 }
 
 impl FromRequest for AuthContext {
-    fn extract(req: Request<BoxBody>) -> kasi_core::BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+    fn extract(
+        req: Request<BoxBody>,
+    ) -> kasi_core::BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
         Box::pin(async move {
             let auth_ctx = Self::verify(&req, &[], &[]).await?;
-            
+
             Ok((auth_ctx, req))
         })
     }
 }
-
 
 impl AuthContext {
     pub async fn password_verify(
@@ -296,4 +297,3 @@ impl AuthContext {
         self.scopes.iter().any(|s| s == scope)
     }
 }
-

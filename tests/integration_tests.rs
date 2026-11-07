@@ -1,6 +1,6 @@
+use http::StatusCode;
 use kasi_jb::prelude::*;
 use serde::{Deserialize, Serialize};
-use http::StatusCode;
 
 // ==========================================
 // 1. MOCK DOMAIN STRUCTS FOR VERIFICATION
@@ -10,7 +10,7 @@ use http::StatusCode;
 struct InventoryItem {
     #[validate(min_len = 5)]
     pub sku: String,
-    
+
     #[validate(range(min = 1, max = 500))]
     pub quantity: i32,
 }
@@ -21,7 +21,7 @@ struct InventoryItem {
 
 #[endpoint(POST, "/items")]
 async fn create_item(
-    ValidatedJson(payload): ValidatedJson<InventoryItem>
+    ValidatedJson(payload): ValidatedJson<InventoryItem>,
 ) -> Result<&'static str, Error> {
     println!("{:#?}", payload);
     Ok("Item verified and saved successfully.")
@@ -34,9 +34,9 @@ async fn create_item(
 #[tokio::test]
 async fn test_validation_failure_emits_rfc7807_problem_details() {
     // A. Initialize the application container configuration
-    let mut app = Application::builder(Config { 
-        host: "127.0.0.1".into(), 
-        port: 0 
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
     })
     .route(__register_create_item)
     .build()
@@ -44,10 +44,13 @@ async fn test_validation_failure_emits_rfc7807_problem_details() {
     .unwrap();
 
     // B. Bind the listener eagerly inside the test execution scope!
-    let listener = app.bind_listener().await.expect("Failed to bind socket listener.");
-    
+    let listener = app
+        .bind_listener()
+        .await
+        .expect("Failed to bind socket listener.");
+
     // This now safely returns the true active port assigned by the OS (e.g. 127.0.0.1:40715)
-    let target_addr = app.local_addr(); 
+    let target_addr = app.local_addr();
 
     // C. Hand ownership of the bound listener over to the execution task
     tokio::task::spawn(async move {
@@ -59,7 +62,8 @@ async fn test_validation_failure_emits_rfc7807_problem_details() {
     // D. Construct a deliberately bad payload violating constraints
     let bad_payload = serde_json::json!({ "sku": "ABC", "quantity": 999 });
     let client = reqwest::Client::new();
-    let response = client.post(&format!("http://{}/items", target_addr))
+    let response = client
+        .post(&format!("http://{}/items", target_addr))
         .json(&bad_payload)
         .send()
         .await
@@ -72,9 +76,9 @@ async fn test_validation_failure_emits_rfc7807_problem_details() {
 #[tokio::test]
 async fn test_validation_success_passes_cleanly() {
     // A. Re-initialize application stack state
-    let mut app = Application::builder(Config { 
-        host: "127.0.0.1".into(), 
-        port: 0 
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
     })
     .route(__register_create_item)
     .build()
@@ -82,14 +86,17 @@ async fn test_validation_success_passes_cleanly() {
     .unwrap();
 
     // B. FIX: Bind the listener eagerly here as well!
-    let listener = app.bind_listener().await.expect("Failed to bind socket listener.");
+    let listener = app
+        .bind_listener()
+        .await
+        .expect("Failed to bind socket listener.");
     let target_addr = app.local_addr();
 
     // C. FIX: Hand ownership of the pre-bound listener to the runtime worker task
-    tokio::task::spawn(async move { 
-        let _ = app.serve_on_listener(listener).await; 
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
     });
-    
+
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // D. Build a valid dataset compliant with all macro parameters
@@ -99,7 +106,8 @@ async fn test_validation_success_passes_cleanly() {
     });
 
     let client = reqwest::Client::new();
-    let response = client.post(&format!("http://{}/items", target_addr))
+    let response = client
+        .post(&format!("http://{}/items", target_addr))
         .header("Content-Type", "application/json")
         .json(&good_payload)
         .send()
@@ -108,7 +116,7 @@ async fn test_validation_success_passes_cleanly() {
 
     // E. Validation passes cleanly, handoff completes successfully returning 200 OK
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let text_output = response.text().await.unwrap();
     assert_eq!(text_output, "Item verified and saved successfully.");
 }

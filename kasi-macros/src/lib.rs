@@ -344,7 +344,7 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
                                         )));
                                     }
                                 });
-                            } 
+                            }
                             // 2. Length check
                             else if meta.path.is_ident("min_len") {
                                 let expr: syn::Expr = meta.value()?.parse()?;
@@ -363,7 +363,6 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
                             else if meta.path.is_ident("range") {
                                 let mut min_val: Option<syn::Expr> = None;
                                 let mut max_val: Option<syn::Expr> = None;
-                                
                                 meta.parse_nested_meta(|inner| {
                                     if inner.path.is_ident("min") {
                                         min_val = Some(inner.value()?.parse()?);
@@ -398,7 +397,6 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
                                 if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = expr {
                                     let pattern = s.value();
                                     let static_regex_ident = quote::format_ident!("__REGEX_{}", field_str.to_uppercase());
-                                    
                                     // Generate a lazy compiled global regex instance to avoid runtime parsing overhead
                                     regex_statics.push(quote! {
                                         static #static_regex_ident: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
