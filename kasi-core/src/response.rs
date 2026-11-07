@@ -56,3 +56,21 @@ where
         }
     }
 }
+
+impl IntoResponse for serde_json::Value {
+    fn into_response(self) -> Response<BoxBody> {
+        // Serialize the JSON value into a string layout format
+        let json_string = self.to_string();
+        let body_bytes = Bytes::from(json_string);
+
+        let boxed_body = Full::new(body_bytes)
+            .map_err(|e| match e {}) // Full is infallible
+            .boxed();
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(boxed_body)
+            .unwrap()
+    }
+}

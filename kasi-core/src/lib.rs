@@ -16,7 +16,7 @@ pub use tokio::net::TcpListener;
 use crate::middleware::{MiddleChain, Middleware};
 use crate::openapi::{EndpointMetadata, InfoSpec, OpenApiSpec};
 use crate::{
-    error::{Error, RequestContext},
+    error::Error,
     middleware::{Module, Next},
 };
 
@@ -40,8 +40,17 @@ struct OpenApiJsonBytes(pub bytes::Bytes);
 struct SwaggerHtmlBytes(pub bytes::Bytes);
 
 pub struct Router {
-    routes: HashMap<(Method, String), HandlerFn>,
+    pub(crate) routes: HashMap<(Method, String), HandlerFn>,
     pub metadata: HashMap<(Method, String), EndpointMetadata>,
+    pub(crate) regex_routes: Vec<RegexRoute>,
+}
+
+pub struct RegexRoute {
+    pub method: Method,
+    pub original_template: String,
+    pub compiled_regex: regex::Regex,
+    pub param_names: Vec<String>,
+    pub handler: HandlerFn,
 }
 
 impl Router {
@@ -49,14 +58,80 @@ impl Router {
         Self {
             routes: HashMap::new(),
             metadata: HashMap::new(),
+            regex_routes: Vec::new(),
         }
     }
 
+    // pub(crate) fn add_raw_handler(&mut self, method: Method, path: &str, handler: HandlerFn) {
+    //     self.routes.insert((method, path.to_string()), handler);
+    // }
+
     pub(crate) fn add_raw_handler(&mut self, method: Method, path: &str, handler: HandlerFn) {
-        self.routes.insert((method, path.to_string()), handler);
+        // Forward the registration down into our uniform compiling route engine!
+        self.compile_and_add_route(method, path, handler);
     }
 
-    // Inside `impl Router` within framework-core/src/lib.rs
+    /// Compiles a route string containing optional inline variable rules
+    /// into an ordered regex routing matrix evaluation slot.
+    pub fn compile_and_add_route(&mut self, method: Method, path: &str, handler: HandlerFn) {
+        // Register flat key fallback state
+        self.routes
+            .insert((method.clone(), path.to_string()), handler.clone());
+
+        let mut regex_pattern = String::new();
+        let mut param_names = Vec::new();
+
+        // Match expressions like: {id:\d+}
+        // Segment splitting path blocks
+        for segment in path.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            regex_pattern.push('/');
+
+            if segment.starts_with('{') && segment.ends_with('}') {
+                let inner = &segment[1..segment.len() - 1];
+                if let Some((param_name, rule)) = inner.split_once(':') {
+                    // Turn '{id:\d+}' -> '(?P<id>\d+)'
+                    regex_pattern.push_str(&format!("(?P<{}>{})", param_name, rule));
+                    param_names.push(param_name.to_string());
+                } else {
+                    // Fallback to standard wildcard path variable matching: '{id}' -> '(?P<id>[^/]+)'
+                    regex_pattern.push_str(&format!("(?P<{}>[^/]+)", inner));
+                    param_names.push(inner.to_string());
+                }
+            } else if segment.starts_with(':') {
+                // Backward-compatible colon pattern matching: ':id' -> '(?P<id>[^/]+)'
+                let param_name = &segment[1..];
+                regex_pattern.push_str(&format!("(?P<{}>[^/]+)", param_name));
+                param_names.push(param_name.to_string());
+            } else {
+                // Standard literal character escape sequence wrapper matching
+                regex_pattern.push_str(&regex::escape(segment));
+            }
+        }
+
+        if regex_pattern.is_empty() {
+            regex_pattern.push('/');
+        }
+
+        // Secure head-and-tail matches to avoid global partial URL hijacking
+        let final_regex_string = format!("^{}$", regex_pattern);
+        let compiled_regex = regex::Regex::new(&final_regex_string).unwrap_or_else(|_| {
+            panic!(
+                "Malformed inline route macro regex spec definition: {}",
+                path
+            )
+        });
+
+        self.regex_routes.push(RegexRoute {
+            method,
+            original_template: path.to_string(),
+            compiled_regex,
+            param_names,
+            handler,
+        });
+    }
 
     pub fn wrap_handles_with_middleware(
         &mut self,
@@ -167,55 +242,40 @@ impl Router {
     pub async fn dispatch(&self, mut req: Request<hyper::body::Incoming>) -> Response<BoxBody> {
         let method = req.method().clone();
         let req_path = req.uri().path();
-        let req_segments: Vec<&str> = req_path.split('/').filter(|s| !s.is_empty()).collect();
+        let context_frame = error::RequestContext::from_request(&req);
 
         let mut matched_handler = None;
         let mut captured_params = std::collections::HashMap::new();
 
-        for ((route_method, route_template), handler) in &self.routes {
-            if *route_method != method {
+        // Iterate through compiled regex tracks in order of configuration registration
+        for route in &self.regex_routes {
+            if route.method != method {
                 continue;
             }
 
-            let template_segments: Vec<&str> = route_template
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
+            if let Some(captures) = route.compiled_regex.captures(req_path) {
+                matched_handler = Some(&route.handler);
 
-            if template_segments.len() != req_segments.len() {
-                continue;
-            }
-
-            let mut is_match = true;
-            let mut local_captures = std::collections::HashMap::new();
-
-            for (tmpl_seg, req_seg) in template_segments.iter().zip(req_segments.iter()) {
-                if tmpl_seg.starts_with(':') {
-                    // Strip the colon (e.g., ":id" -> "id") and store the variable capture
-                    let param_key = tmpl_seg[1..].to_string();
-                    local_captures.insert(param_key, req_seg.to_string());
-                } else if tmpl_seg != req_seg {
-                    is_match = false;
-                    break;
+                // Extract all registered capture group variables dynamically
+                for name in &route.param_names {
+                    if let Some(matched_group) = captures.name(name) {
+                        captured_params.insert(name.clone(), matched_group.as_str().to_string());
+                    }
                 }
-            }
-
-            if is_match {
-                matched_handler = Some(handler);
-                captured_params = local_captures;
                 break;
             }
         }
 
-        let context_frame = RequestContext::from_request(&req);
-
         if let Some(handler) = matched_handler {
-            // Safely pass the populated path variable map to the request extensions!
+            // Hydrate the PathParams container context matching your `Path<T>` extraction models
             req.extensions_mut().insert(PathParams(captured_params));
             handler(req).await
         } else {
-            Error::NotFound(format!("No route found for {} {}", method, req_path))
-                .into_response_with_context(&context_frame)
+            Error::NotFound(format!(
+                "No matching route rule sequence identified for {} {}",
+                method, req_path
+            ))
+            .into_response_with_context(&context_frame)
         }
     }
 }
@@ -617,8 +677,14 @@ impl ApplicationBuilder {
         handler: HandlerFn,
         meta: EndpointMetadata,
     ) -> Self {
+        // 1. Store metadata definitions matching the path template exactly for OpenAPI specs
         self.router
-            .add_endpoint_with_meta(method, path, handler, meta);
+            .metadata
+            .insert((method.clone(), path.to_string()), meta);
+
+        // 2. Compile route expression layout rules and cache evaluation bindings natively
+        self.router.compile_and_add_route(method, path, handler);
+
         self
     }
 

@@ -66,9 +66,10 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
-    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES (Aligned to Request<BoxBody> threading)
+    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES
     let mut extraction_blocks = Vec::new();
     let mut handler_arguments = Vec::new();
+    let mut tx_variable_ident = None; // Track the exact index matching the Tx variable layout
 
     for (index, arg) in fn_inputs.iter().enumerate() {
         if let FnArg::Typed(pat_type) = arg {
@@ -76,13 +77,17 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             let var_name = quote::format_ident!("__extracted_arg_{}", index);
 
             let is_auth_context = quote!(#ty).to_string().contains("AuthContext");
+            let is_transaction = quote!(#ty).to_string().contains("Tx");
+
+            if is_transaction {
+                tx_variable_ident = Some(var_name.clone());
+            }
 
             if is_auth_context {
                 extraction_blocks.push(quote! {
                     let #var_name = #auth_context_var.clone();
                 });
             } else {
-                // Thread ownership dynamically across execution parameters
                 extraction_blocks.push(quote! {
                     let (#var_name, __updated_req) = match <#ty as kasi_jb::prelude::FromRequest>::extract(__active_req).await {
                         Ok(tuple_res) => tuple_res,
@@ -96,20 +101,45 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     }
 
-    // 4. GENERATE A UNIQUE INTERNAL REGISTER IDENTIFIER HELPER FUNCTION
+    // 4. TRANSACTION ENFORCEMENT MATCH STRATEGY
+    let execution_pipeline_block = if let Some(tx_ident) = tx_variable_ident {
+        quote! {
+            match #fn_ident(#(#handler_arguments),*).await {
+                Ok(res) => {
+                    if let Err(commit_err) = #tx_ident.0.commit().await {
+                        kasi_jb::prelude::IntoResponse::into_response(
+                            kasi_jb::prelude::Error::Internal(format!("Transaction commit routine failure: {}", commit_err))
+                        )
+                    } else {
+                        kasi_jb::prelude::IntoResponse::into_response(res)
+                    }
+                }
+                Err(handler_err) => {
+                    let _ = #tx_ident.0.rollback().await;
+                    kasi_jb::prelude::IntoResponse::into_response(handler_err)
+                }
+            }
+        }
+    } else {
+        quote! {
+            match #fn_ident(#(#handler_arguments),*).await {
+                Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
+                Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
+            }
+        }
+    };
+
+    // 5. GENERATE A UNIQUE INTERNAL REGISTER IDENTIFIER HELPER FUNCTION
     let reg_helper_ident = quote::format_ident!("__register_{}", fn_ident);
 
     let expanded = quote! {
-        // Keep the developer's original function exactly as they wrote it
         #fn_vis async fn #fn_ident(#fn_inputs) #fn_output #fn_block
 
-        // Hidden registration helper function that links to ApplicationBuilder
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         #fn_vis fn #reg_helper_ident(builder: kasi_jb::prelude::ApplicationBuilder) -> kasi_jb::prelude::ApplicationBuilder {
             let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
                 Box::pin(async move {
-                    // Type-erase the hyper Incoming request immediately before routing it through security and parameters
                     let (parts, incoming_body) = req.into_parts();
                     let boxed_incoming_body = http_body_util::BodyExt::map_err(incoming_body, |e| hyper::Error::from(e)).boxed();
                     let mut __active_req = http::Request::from_parts(parts, boxed_incoming_body);
@@ -117,10 +147,8 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                     #security_check_block
                     #(#extraction_blocks)*
 
-                    match #fn_ident(#(#handler_arguments),*).await {
-                        Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
-                        Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
-                    }
+                    // FIXED: Interweave our execution pipeline block containing transaction rules!
+                    #execution_pipeline_block
                 })
             });
 

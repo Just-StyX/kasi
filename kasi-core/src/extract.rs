@@ -1,7 +1,7 @@
 use http::{Request, header};
 use http_body_util::BodyExt;
 #[cfg(feature = "postgres")]
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use serde::de::DeserializeOwned;
 #[cfg(feature = "postgres")]
 use sqlx::PgPool;
@@ -22,6 +22,35 @@ pub struct DbPool(pub PgPool);
 
 pub struct ValidatedJson<T>(pub T);
 
+/// Explicitly wraps an active SeaORM transaction lifecycle boundary.
+/// Automatically issues an atomic COMMIT on success, or a ROLLBACK on error.
+pub struct Tx(pub DatabaseTransaction);
+
+impl FromRequest for Tx {
+    fn extract(
+        req: Request<BoxBody>,
+    ) -> BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+        Box::pin(async move {
+            let conn = req.extensions()
+                .get::<DatabaseConnection>()
+                .cloned()
+                .ok_or_else(|| Error::Internal(
+                    "SeaORM DatabaseConnection instance missing from request extensions context.".into()
+                ))?;
+
+            // Begin an isolated atomic transaction stream block eagerly
+            let transaction = conn.begin().await.map_err(|e| {
+                Error::Internal(format!(
+                    "Failed to initialize database transaction block: {}",
+                    e
+                ))
+            })?;
+
+            Ok((Tx(transaction), req))
+        })
+    }
+}
+
 impl<T> FromRequest for ValidatedJson<T>
 where
     T: serde::de::DeserializeOwned + Validate + Send + 'static, // Requires Validate trait bound!
@@ -30,16 +59,12 @@ where
         req: Request<BoxBody>,
     ) -> BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
         Box::pin(async move {
-            // 1. First, reuse our existing Json extraction logic by delegating to its FromRequest lifecycle
             let (Json(payload), remaining_req) = <Json<T> as FromRequest>::extract(req).await?;
 
-            // 2. Perform validation guards immediately after structural deserialization succeeds
             if let Err(validation_error) = payload.validate() {
-                // Short-circuit the pipeline if semantic rules are violated
                 return Err(validation_error);
             }
 
-            // 3. Return the fully verified payload context safely back to the execution line
             Ok((ValidatedJson(payload), remaining_req))
         })
     }
@@ -115,8 +140,6 @@ where
             let value: T = serde_json::from_slice(&bytes)
                 .map_err(|e| Error::BadRequest(format!("JSON Deserialization Failure: {}", e)))?;
 
-            // FIX: Create an empty body stream and box it into the required framework `BoxBody` type.
-            // This guarantees that the branches share identical concrete types!
             let blank_body = http_body_util::Empty::<bytes::Bytes>::new()
                 .map_err(|e| match e {}) // Empty is infallible, cast it to match hyper::Error
                 .boxed();
@@ -148,31 +171,41 @@ where
 
 impl<T> FromRequest for Path<T>
 where
-    T: DeserializeOwned + Send + 'static,
+    T: serde::de::DeserializeOwned + Send + 'static,
 {
     fn extract(
         req: Request<BoxBody>,
-    ) -> BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+    ) -> crate::BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
         Box::pin(async move {
-            // Locate the registered structural route variable map via extensions lookups
             let params = req.extensions().get::<PathParams>().ok_or_else(|| {
                 Error::Internal(
                     "Router failed to inject PathParams extension framework layer".into(),
                 )
             })?;
 
-            let serialized_params = params
-                .0
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect::<Vec<String>>()
-                .join("&");
+            let mut json_map = serde_json::Map::new();
+            for (k, v) in &params.0 {
+                json_map.insert(k.clone(), serde_json::Value::String(v.clone()));
+            }
+            let json_object = serde_json::Value::Object(json_map);
 
-            let value: T = serde_urlencoded::from_str(&serialized_params).map_err(|e| {
-                Error::BadRequest(format!("URL Path Parameter Parsing Failure: {}", e))
-            })?;
+            if let Ok(value) = serde_json::from_value::<T>(json_object) {
+                return Ok((Path(value), req));
+            }
 
-            Ok((Path(value), req))
+            if params.0.len() == 1 {
+                if let Some(raw_string_value) = params.0.values().next() {
+                    let primitive_json_value = serde_json::Value::String(raw_string_value.clone());
+                    if let Ok(value) = serde_json::from_value::<T>(primitive_json_value) {
+                        return Ok((Path(value), req));
+                    }
+                }
+            }
+
+            Err(Error::BadRequest(
+                "URL Path Parameter Parsing Failure: Mismatched path type signature layout rules."
+                    .into(),
+            ))
         })
     }
 }
