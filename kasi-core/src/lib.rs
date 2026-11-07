@@ -636,7 +636,7 @@ impl ApplicationBuilder {
         let middleware_chain = self.middleware;
         router.wrap_handles_with_middleware(middleware_chain);
         Ok(Application {
-            router: router,
+            router,
             config: self.config,
             extensions: self.extensions,
         })

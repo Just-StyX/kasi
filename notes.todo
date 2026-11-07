@@ -1,5 +1,5 @@
-1. CORS and CSRS
-2. Nested routes
+1. CORS and CSRS - done
+2. Nested routes - done
 3. Endpoint take media types for consume and produces?
 4. Password authentication
 5. UserDetails and UserDetailsService
