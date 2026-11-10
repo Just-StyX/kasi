@@ -17,10 +17,10 @@ Enable optional feature flags as needed:
 ```toml
 [dependencies]
 # Default enables both `postgres` (SeaORM + SQLx) and `templates` (MiniJinja)
-kasi-jb = "0.1.11"
+kasi-jb = "0.2.0"
 
 # Or opt into only what you need:
-# kasi-jb = { version = "0.1.11", default-features = false, features = ["templates"] }
+# kasi-jb = { version = "0.2.0", default-features = false, features = ["templates"] }
 ```
 
 ---
