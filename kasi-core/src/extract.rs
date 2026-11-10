@@ -26,6 +26,33 @@ pub struct ValidatedJson<T>(pub T);
 /// Automatically issues an atomic COMMIT on success, or a ROLLBACK on error.
 pub struct Tx(pub DatabaseTransaction);
 
+/// Extracts a cloned instance of `T` from the request's `Extensions` type-map.
+pub struct Extension<T>(pub T);
+
+impl<T> FromRequest for Extension<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn extract(
+        req: Request<BoxBody>,
+    ) -> BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+        Box::pin(async move {
+            let val = req
+                .extensions()
+                .get::<T>()
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "Missing required request extension of type '{}'. Did you register it via .extension()?",
+                        std::any::type_name::<T>()
+                    ))
+                })?;
+
+            Ok((Extension(val), req))
+        })
+    }
+}
+
 impl FromRequest for Tx {
     fn extract(
         req: Request<BoxBody>,

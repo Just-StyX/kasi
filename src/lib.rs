@@ -2,15 +2,18 @@ pub use kasi_core as kcore;
 pub use kasi_macros::*;
 pub use kasi_security as ksecure;
 
-pub use bytes;
-pub use http_body_util;
-pub use tokio;
+// pub use bytes;
+// pub use http_body_util;
+// pub use minijinja;
+// pub use tokio;
 
 pub mod prelude {
     pub use kasi_core::{
-        Application, ApplicationBuilder, BoxBody, Config, HandlerFn, PathParams, Router,
+        Application, ApplicationBuilder, BoxBody, Config, EndpointRegistry, HandlerFn, PathParams,
+        RegisterEndpoint, Router,
         middleware::{
-            CorsMiddleware, InternalMiddlewareLayer, MiddleChain, Module, Next, RegisterRoute,
+            CorsMiddleware, InternalMiddlewareLayer, LogFormat, MiddleChain, Module, Next,
+            RateLimitMiddleware, RegisterRoute, TracingMiddleware,
         },
     };
 
@@ -21,14 +24,21 @@ pub mod prelude {
     pub use bytes::Bytes;
     pub use http_body_util::{BodyExt, Full};
 
+    pub use kasi_core::openapi::{ComponentsSpec, EndpointMetadata, Schema, SchemaObject};
+    pub use kasi_macros::{IntoResponse, Schema, Validate, endpoint, main};
+
     pub use kasi_core::error::{Error, RequestContext, Validate};
-    pub use kasi_core::extract::{FromRequest, Json, Path, Query, ValidatedJson};
-    pub use kasi_core::openapi::EndpointMetadata;
+    pub use kasi_core::extract::{Extension, FromRequest, Json, Path, Query, ValidatedJson};
     pub use kasi_core::response::IntoResponse;
-    pub use kasi_macros::{IntoResponse, Validate, endpoint, main};
     pub use kasi_security::{AuthContext, OAuth2, RequiredRole};
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::{Value as JsonValue, json};
+
+    #[cfg(feature = "templates")]
+    pub use kasi_core::templates::{Html, TemplateEngine};
+
+    #[cfg(feature = "templates")]
+    pub use minijinja::context as template_context;
 
     #[cfg(feature = "postgres")]
     pub mod db {

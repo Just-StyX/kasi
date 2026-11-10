@@ -22,17 +22,18 @@ serde_json.workspace = true
 serde_urlencoded.workspace = true
 nom.workspace = true
 regex.workspace = true
-minijinja.workspace = true
-minijinja-embed.workspace = true
 bytes.workspace = true
 uuid.workspace = true
 
 # Optional engines enabled conditionally under feature propagation boundaries
 sqlx = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
+minijinja = { workspace = true, optional = true }
+minijinja-embed = { workspace = true, optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12.5", features = ["json"] }
 
 [features]
 postgres = ["dep:sea-orm", "dep:sqlx"]
+templates = ["dep:minijinja", "dep:minijinja-embed"]

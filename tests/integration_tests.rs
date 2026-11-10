@@ -38,7 +38,7 @@ async fn test_validation_failure_emits_rfc7807_problem_details() {
         host: "127.0.0.1".into(),
         port: 0,
     })
-    .route(__register_create_item)
+    .route(create_item)
     .build()
     .await
     .unwrap();
@@ -80,7 +80,7 @@ async fn test_validation_success_passes_cleanly() {
         host: "127.0.0.1".into(),
         port: 0,
     })
-    .route(__register_create_item)
+    .route(create_item)
     .build()
     .await
     .unwrap();
@@ -154,7 +154,7 @@ async fn test_regex_route_matching_success() {
         host: "127.0.0.1".into(),
         port: 0,
     })
-    .route(__register_get_item_by_regex_sku)
+    .route(get_item_by_regex_sku)
     .build()
     .await
     .unwrap();
@@ -197,7 +197,7 @@ async fn test_regex_route_matching_rejection_falls_through_to_404() {
         host: "127.0.0.1".into(),
         port: 0,
     })
-    .route(__register_get_item_by_regex_sku)
+    .route(get_item_by_regex_sku)
     .build()
     .await
     .unwrap();
@@ -235,4 +235,283 @@ async fn test_regex_route_matching_rejection_falls_through_to_404() {
         .await
         .unwrap();
     assert_eq!(res_no_digits.status(), StatusCode::NOT_FOUND);
+}
+
+// ==========================================
+// 4. TRACING & NESTED MODULE INTEGRATION TESTS
+// ==========================================
+
+#[derive(Debug, Serialize, Deserialize, Validate)]
+struct RestockRequest {
+    #[validate(range(min = 1, max = 1000))]
+    pub units: i32,
+}
+
+#[endpoint(POST, "/restock")]
+async fn restock_inventory(
+    ctx: RequestContext,
+    ValidatedJson(payload): ValidatedJson<RestockRequest>,
+) -> Result<JsonValue, Error> {
+    Ok(json!({
+        "restocked": payload.units,
+        "trace_id": ctx.trace_id().to_string(),
+        "path": ctx.uri_path(),
+    }))
+}
+
+#[tokio::test]
+async fn test_tracing_propagation_and_nested_module_routing() {
+    // 1. Build child module and nest inside `/api/v1` with custom middleware
+    let inventory_mod = Module::new("/inventory").route(restock_inventory);
+
+    let api_v1 = Module::new("/api/v1")
+        .wrap(kasi_core::middleware::from_fn(|req, next| async move {
+            let mut res = next.run(req).await;
+            res.headers_mut()
+                .insert("x-module-scope", HeaderValue::from_static("api-v1"));
+            Ok(res)
+        }))
+        .nest_with_docs(inventory_mod);
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .middleware(TracingMiddleware::new())
+    .register_module(api_v1)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let custom_trace_id = uuid::Uuid::new_v4().to_string();
+
+    // Case A: Valid request propagates custom X-Request-Id and parent module middleware header
+    let ok_res = client
+        .post(&format!("http://{}/api/v1/inventory/restock", target_addr))
+        .header("x-request-id", &custom_trace_id)
+        .json(&serde_json::json!({ "units": 50 }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(ok_res.status(), StatusCode::OK);
+    assert_eq!(
+        ok_res
+            .headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        custom_trace_id
+    );
+    assert_eq!(
+        ok_res
+            .headers()
+            .get("x-module-scope")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "api-v1"
+    );
+
+    let ok_json: serde_json::Value = ok_res.json().await.unwrap();
+    assert_eq!(ok_json["trace_id"], custom_trace_id);
+    assert_eq!(ok_json["path"], "/api/v1/inventory/restock");
+
+    // Case B: Validation failure embeds the active trace_id and real URI path in RFC 7807 JSON
+    let err_res = client
+        .post(&format!("http://{}/api/v1/inventory/restock", target_addr))
+        .header("x-request-id", &custom_trace_id)
+        .json(&serde_json::json!({ "units": -5 }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(err_res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        err_res
+            .headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        custom_trace_id
+    );
+
+    let err_json: serde_json::Value = err_res.json().await.unwrap();
+    assert_eq!(err_json["trace_id"], custom_trace_id);
+    assert_eq!(err_json["instance"], "/api/v1/inventory/restock");
+}
+
+// ==========================================
+// 5. OPENAPI SCHEMA, TEMPLATES & RATE LIMIT TESTS
+// ==========================================
+
+#[derive(Debug, Serialize, Deserialize, IntoResponse, Schema)]
+struct ProductSummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub price_cents: u32,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[endpoint(GET, "/products/{id}")]
+#[response(status = 200, description = "Returns product details", json = ProductSummary)]
+async fn get_product(Path(id): Path<uuid::Uuid>) -> Result<ProductSummary, Error> {
+    Ok(ProductSummary {
+        id,
+        name: "Mechanical Keyboard".into(),
+        price_cents: 14900,
+        description: None,
+        tags: vec!["hardware".into(), "peripherals".into()],
+    })
+}
+
+#[tokio::test]
+async fn test_openapi_schema_generation_endpoint() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .register_schema::<ProductSummary>()
+    .route(get_product)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&format!("http://{}/openapi.json", target_addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let spec: serde_json::Value = res.json().await.unwrap();
+
+    // Verify path reference and generated component schema fields
+    let schema = &spec["components"]["schemas"]["ProductSummary"];
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["id"]["format"], "uuid");
+    assert_eq!(schema["properties"]["price_cents"]["type"], "integer");
+    assert_eq!(schema["properties"]["tags"]["type"], "array");
+
+    // `description` is Option<String>, so it must NOT appear in `required`
+    let required = schema["required"].as_array().unwrap();
+    assert!(required.iter().any(|v| v == "id"));
+    assert!(required.iter().any(|v| v == "name"));
+    assert!(!required.iter().any(|v| v == "description"));
+}
+
+#[cfg(feature = "templates")]
+#[endpoint(GET, "/hello/{name}")]
+async fn render_hello_page(
+    engine: TemplateEngine,
+    Path(name): Path<String>,
+) -> Result<Html, Error> {
+    engine.render("hello.html", template_context!(name => name))
+}
+
+#[cfg(feature = "templates")]
+#[tokio::test]
+async fn test_minijinja_template_rendering() {
+    let mut env = minijinja::Environment::new();
+    env.add_template("hello.html", "<h1>Hello, {{ name }}!</h1>")
+        .unwrap();
+    let engine = TemplateEngine::from_env(env);
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .extension(engine)
+    .route(render_hello_page)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&format!("http://{}/hello/Justice", target_addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("content-type").unwrap().to_str().unwrap(),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(res.text().await.unwrap(), "<h1>Hello, Justice!</h1>");
+}
+
+#[endpoint(GET, "/ping")]
+async fn ping_handler() -> &'static str {
+    "pong"
+}
+
+#[tokio::test]
+async fn test_rate_limit_middleware_enforces_quota() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .middleware(RateLimitMiddleware::new(
+        2,
+        std::time::Duration::from_secs(60),
+    ))
+    .route(ping_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/ping", target_addr);
+
+    // First 2 requests succeed
+    let r1 = client.get(&url).send().await.unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    assert_eq!(r1.headers().get("x-ratelimit-remaining").unwrap(), "1");
+
+    let r2 = client.get(&url).send().await.unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    assert_eq!(r2.headers().get("x-ratelimit-remaining").unwrap(), "0");
+
+    // 3rd request is throttled with 429 Too Many Requests
+    let r3 = client.get(&url).send().await.unwrap();
+    assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS);
 }

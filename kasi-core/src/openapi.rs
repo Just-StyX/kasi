@@ -25,6 +25,36 @@ pub struct SchemaRef {
     pub reference: String,
 }
 
+/// Represents an OpenAPI 3.1.0 Schema definition for a struct or field.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SchemaObject {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub schema_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<HashMap<String, SchemaObject>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Box<SchemaObject>>,
+    #[serde(rename = "$ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+}
+
+/// Container for reusable OpenAPI components.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComponentsSpec {
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub schemas: HashMap<String, SchemaObject>,
+}
+
+/// Trait implemented by `#[derive(Schema)]` to generate OpenAPI JSON schemas.
+pub trait Schema {
+    fn schema_name() -> &'static str;
+    fn schema_object() -> SchemaObject;
+}
+
 impl EndpointMetadata {
     pub fn new() -> Self {
         Self {
@@ -63,6 +93,8 @@ pub struct OpenApiSpec {
     pub openapi: String,
     pub info: InfoSpec,
     pub paths: HashMap<String, HashMap<String, EndpointMetadata>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<ComponentsSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

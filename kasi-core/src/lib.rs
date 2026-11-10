@@ -14,7 +14,9 @@ pub use hyper_util::{rt::TokioExecutor, server::conn::auto};
 pub use tokio::net::TcpListener;
 
 use crate::middleware::{MiddleChain, Middleware};
-use crate::openapi::{EndpointMetadata, InfoSpec, OpenApiSpec};
+use crate::openapi::{
+    ComponentsSpec, EndpointMetadata, InfoSpec, OpenApiSpec, Schema, SchemaObject,
+};
 use crate::{
     error::Error,
     middleware::{Module, Next},
@@ -32,6 +34,8 @@ pub mod extract;
 pub mod middleware;
 pub mod openapi;
 pub mod response;
+#[cfg(feature = "templates")]
+pub mod templates;
 
 #[derive(Clone)]
 struct OpenApiJsonBytes(pub bytes::Bytes);
@@ -42,6 +46,7 @@ struct SwaggerHtmlBytes(pub bytes::Bytes);
 pub struct Router {
     pub(crate) routes: HashMap<(Method, String), HandlerFn>,
     pub metadata: HashMap<(Method, String), EndpointMetadata>,
+    pub schemas: HashMap<String, SchemaObject>,
     pub(crate) regex_routes: Vec<RegexRoute>,
 }
 
@@ -58,13 +63,10 @@ impl Router {
         Self {
             routes: HashMap::new(),
             metadata: HashMap::new(),
+            schemas: HashMap::new(),
             regex_routes: Vec::new(),
         }
     }
-
-    // pub(crate) fn add_raw_handler(&mut self, method: Method, path: &str, handler: HandlerFn) {
-    //     self.routes.insert((method, path.to_string()), handler);
-    // }
 
     pub(crate) fn add_raw_handler(&mut self, method: Method, path: &str, handler: HandlerFn) {
         // Forward the registration down into our uniform compiling route engine!
@@ -141,9 +143,8 @@ impl Router {
             return;
         }
 
-        let original_routes = std::mem::take(&mut self.routes);
-
-        for ((method, path), base_handler) in original_routes {
+        for route in &mut self.regex_routes {
+            let base_handler = route.handler.clone();
             let incoming_request_cell = std::sync::Arc::new(tokio::sync::Mutex::new(
                 None::<http::Request<hyper::body::Incoming>>,
             ));
@@ -151,13 +152,17 @@ impl Router {
             let cell_for_chain = incoming_request_cell.clone();
             let handler_clone = base_handler.clone();
 
-            let mut current_chain: MiddleChain = std::sync::Arc::new(move |_req_box| {
+            let mut current_chain: MiddleChain = std::sync::Arc::new(move |req_box| {
                 let cell = cell_for_chain.clone();
                 let handler = handler_clone.clone();
 
                 Box::pin(async move {
                     let mut guard = cell.lock().await;
-                    if let Some(native_req) = guard.take() {
+                    if let Some(mut native_req) = guard.take() {
+                        // Propagate extensions added by middleware (e.g., RequestContext) into the handler request
+                        native_req
+                            .extensions_mut()
+                            .extend(req_box.extensions().clone());
                         handler(native_req).await
                     } else {
                         let error_bytes =
@@ -182,7 +187,7 @@ impl Router {
             let cell_for_handler = incoming_request_cell.clone();
             let final_middleware_chain = current_chain;
 
-            let finalized_handler: HandlerFn = std::sync::Arc::new(move |req_incoming| {
+            route.handler = std::sync::Arc::new(move |req_incoming| {
                 let cell = cell_for_handler.clone();
                 let chain = final_middleware_chain.clone();
 
@@ -203,8 +208,6 @@ impl Router {
                     chain(middleware_req).await
                 })
             });
-
-            self.routes.insert((method, path), finalized_handler);
         }
     }
 
@@ -242,7 +245,13 @@ impl Router {
     pub async fn dispatch(&self, mut req: Request<hyper::body::Incoming>) -> Response<BoxBody> {
         let method = req.method().clone();
         let req_path = req.uri().path();
-        let context_frame = error::RequestContext::from_request(&req);
+
+        // Reuse existing RequestContext if injected upstream, otherwise create one
+        let context_frame = req
+            .extensions()
+            .get::<error::RequestContext>()
+            .cloned()
+            .unwrap_or_else(|| error::RequestContext::from_request(&req));
 
         let mut matched_handler = None;
         let mut captured_params = std::collections::HashMap::new();
@@ -267,15 +276,23 @@ impl Router {
         }
 
         if let Some(handler) = matched_handler {
-            // Hydrate the PathParams container context matching your `Path<T>` extraction models
+            // Hydrate both RequestContext and PathParams so handlers can extract either
+            req.extensions_mut().insert(context_frame);
             req.extensions_mut().insert(PathParams(captured_params));
             handler(req).await
         } else {
-            Error::NotFound(format!(
+            let mut resp = Error::NotFound(format!(
                 "No matching route rule sequence identified for {} {}",
                 method, req_path
             ))
-            .into_response_with_context(&context_frame)
+            .into_response_with_context(&context_frame);
+
+            // Echo the trace_id on 404 responses so clients can correlate unmatched routes
+            if let Ok(val) = http::HeaderValue::from_str(&context_frame.trace_id().to_string()) {
+                resp.headers_mut()
+                    .insert(http::header::HeaderName::from_static("x-request-id"), val);
+            }
+            resp
         }
     }
 }
@@ -296,170 +313,6 @@ pub struct Application {
     config: Config,
     extensions: Extensions,
 }
-
-// impl Application {
-//     pub fn builder(config: Config) -> ApplicationBuilder {
-//         ApplicationBuilder::new(config)
-//     }
-
-//     pub fn into_router(self) -> Router {
-//         self.router
-//     }
-
-//     pub fn inject_extension<T>(&mut self, val: T)
-//     where
-//         T: Send + Sync + Clone + 'static,
-//     {
-//         self.extensions.insert(val);
-//     }
-
-//     pub fn generate_openapi_spec(&self, title: &str, version: &str) -> OpenApiSpec {
-//         let mut paths: HashMap<String, HashMap<String, EndpointMetadata>> = HashMap::new();
-
-//         for ((method, path), meta) in &self.router.metadata {
-//             let method_string = method.to_string().to_lowercase();
-
-//             paths
-//                 .entry(path.clone())
-//                 .or_default()
-//                 .insert(method_string, meta.clone());
-//         }
-
-//         OpenApiSpec {
-//             openapi: "3.1.0".to_string(),
-//             info: InfoSpec {
-//                 title: title.to_string(),
-//                 version: version.to_string(),
-//             },
-//             paths,
-//         }
-//     }
-
-//     pub async fn serve(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//         // 1. Bind to the requested address pattern
-//         let initial_addr = format!("{}:{}", self.config.host, self.config.port);
-//         let listener = TcpListener::bind(&initial_addr).await?;
-
-//         // FIX: Extract the actual socket assigned by the OS kernel and update the config state.
-//         // This ensures `self.generate_openapi_spec` and `app.local_addr()` match perfectly!
-//         let bound_addr = listener.local_addr()?;
-//         self.config.port = bound_addr.port();
-
-//         // Re-format the address string using the true runtime port
-//         let addr = format!("{}:{}", self.config.host, self.config.port);
-
-//         // Compile the specification document based on macro compile data
-//         let spec = self.generate_openapi_spec("Kasi Microservice Engine", "1.0.0");
-//         let spec_json_bytes = bytes::Bytes::from(serde_json::to_string_pretty(&spec).unwrap());
-
-//         // FIXED: Insert using our unique structural wrapper type
-//         self.extensions.insert(OpenApiJsonBytes(spec_json_bytes));
-
-//         // Compile the visual Swagger UI HTML dashboard layout
-//         let swagger_ui_html = r#"
-//         <!DOCTYPE html>
-//         <html lang="en">
-//         <head>
-//             <meta charset="utf-8" />
-//             <meta name="viewport" content="width=device-width, initial-scale=1" />
-//             <title>Kasi Framework API Documentation</title>
-//             <link rel="stylesheet" href="https://cloudflare.com" />
-//         </head>
-//         <body>
-//             <div id="swagger-ui"></div>
-//             <script src="https://cloudflare.com" crossorigin></script>
-//             <script>
-//                 window.onload = () => {{
-//                     window.ui = SwaggerUIBundle({{
-//                         url: '/openapi.json',
-//                         dom_id: '#swagger-ui',
-//                         deepLinking: true,
-//                         presets: [
-//                             SwaggerUIBundle.presets.apis,
-//                         ],
-//                     }});
-//                 }};
-//             </script>
-//         </body>
-//         </html>
-//         "#
-//         .to_string();
-
-//         let swagger_bytes = bytes::Bytes::from(swagger_ui_html);
-//         self.extensions.insert(SwaggerHtmlBytes(swagger_bytes));
-
-//         println!("Kasi server listening natively on http://{}", addr);
-//         println!(
-//             "OpenAPI JSON documentation structure available at http://{}/openapi.json",
-//             addr
-//         );
-//         println!(
-//             "Graphical Swagger UI Dashboard active at http://{}/docs",
-//             addr
-//         );
-
-//         let shared_router = Arc::new(self.router);
-//         let shared_extensions = Arc::new(self.extensions);
-
-//         loop {
-//             let (stream, _remote_addr) = listener.accept().await?;
-//             let io = TokioIo::new(stream);
-//             let router_clone = shared_router.clone();
-//             let extensions_clone = shared_extensions.clone();
-
-//             tokio::task::spawn(async move {
-//                 let service = service_fn(move |mut req: Request<Incoming>| {
-//                     let router = router_clone.clone();
-//                     let extensions = extensions_clone.clone();
-//                     async move {
-//                         req.extensions_mut().extend(extensions.as_ref().clone());
-
-//                         // Intercept JSON Spec calls
-//                         if req.uri().path() == "/openapi.json" && req.method() == Method::GET {
-//                             if let Some(wrapped_json) = extensions.get::<OpenApiJsonBytes>() {
-//                                 let body = http_body_util::Full::new(wrapped_json.0.clone())
-//                                     .map_err(|e| match e {})
-//                                     .boxed();
-//                                 return Ok::<_, hyper::Error>(
-//                                     Response::builder()
-//                                         .status(200)
-//                                         .header("Content-Type", "application/json")
-//                                         .body(body)
-//                                         .unwrap(),
-//                                 );
-//                             }
-//                         }
-
-//                         // Intercept Graphical Swagger UI Dashboard calls
-//                         if req.uri().path() == "/docs" && req.method() == Method::GET {
-//                             if let Some(wrapped_html) = extensions.get::<SwaggerHtmlBytes>() {
-//                                 let body = http_body_util::Full::new(wrapped_html.0.clone())
-//                                     .map_err(|e| match e {})
-//                                     .boxed();
-//                                 return Ok::<_, hyper::Error>(
-//                                     Response::builder()
-//                                         .status(200)
-//                                         .header("Content-Type", "text/html; charset=utf-8")
-//                                         .body(body)
-//                                         .unwrap(),
-//                                     );
-//                             }
-//                         }
-
-//                         Ok::<_, hyper::Error>(router.dispatch(req).await)
-//                     }
-//                 });
-//                 let _ = auto::Builder::new(TokioExecutor::new())
-//                     .serve_connection(io, service)
-//                     .await;
-//             });
-//         }
-//     }
-
-//     pub fn local_addr(&self) -> String {
-//         format!("{}:{}", self.config.host, self.config.port)
-//     }
-// }
 
 impl Application {
     /// Ergonomic surface initializer to construct an ApplicationBuilder loop.
@@ -491,12 +344,19 @@ impl Application {
 
         for ((method, path), meta) in &self.router.metadata {
             let method_string = method.to_string().to_lowercase();
-
             paths
                 .entry(path.clone())
                 .or_default()
                 .insert(method_string, meta.clone());
         }
+
+        let components = if self.router.schemas.is_empty() {
+            None
+        } else {
+            Some(ComponentsSpec {
+                schemas: self.router.schemas.clone(),
+            })
+        };
 
         OpenApiSpec {
             openapi: "3.1.0".to_string(),
@@ -505,6 +365,7 @@ impl Application {
                 version: version.to_string(),
             },
             paths,
+            components,
         }
     }
 
@@ -523,19 +384,23 @@ impl Application {
         Ok(listener)
     }
 
-    /// Serves incoming requests natively using an explicitly pre-bound TcpListener socket container.
-    pub async fn serve_on_listener(
+    /// Serves incoming requests on a pre-bound `TcpListener` until `shutdown_signal` resolves,
+    /// then drains active connections cleanly before returning.
+    pub async fn serve_with_graceful_shutdown<F>(
         mut self,
         listener: TcpListener,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        shutdown_signal: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let addr = format!("{}:{}", self.config.host, self.config.port);
 
-        // 1. Compile the specification document based on macro compile data
+        // 1. Compile OpenAPI spec & Swagger UI assets
         let spec = self.generate_openapi_spec("Kasi Microservice Engine", "1.0.0");
         let spec_json_bytes = bytes::Bytes::from(serde_json::to_string_pretty(&spec).unwrap());
         self.extensions.insert(OpenApiJsonBytes(spec_json_bytes));
 
-        // 2. Compile the visual Swagger UI HTML dashboard layout
         let swagger_ui_html = r#"
         <!DOCTYPE html>
         <html lang="en">
@@ -543,20 +408,18 @@ impl Application {
             <meta charset="utf-8" />
             <meta name="viewport" content="width=device-width, initial-scale=1" />
             <title>Kasi Framework API Documentation</title>
-            <link rel="stylesheet" href="https://cloudflare.com" />
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.29.1/swagger-ui.css" />
         </head>
         <body>
             <div id="swagger-ui"></div>
-            <script src="https://cloudflare.com" crossorigin></script>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.29.1/swagger-ui.js" crossorigin></script>
             <script>
                 window.onload = () => {
                     window.ui = SwaggerUIBundle({
                         url: '/openapi.json',
                         dom_id: '#swagger-ui',
                         deepLinking: true,
-                        presets: [
-                            SwaggerUIBundle.presets.apis,
-                        ],
+                        presets: [SwaggerUIBundle.presets.apis],
                     });
                 };
             </script>
@@ -565,83 +428,135 @@ impl Application {
         "#
         .to_string();
 
-        let swagger_bytes = bytes::Bytes::from(swagger_ui_html);
-        self.extensions.insert(SwaggerHtmlBytes(swagger_bytes));
+        self.extensions
+            .insert(SwaggerHtmlBytes(bytes::Bytes::from(swagger_ui_html)));
 
         println!("Kasi server listening natively on http://{}", addr);
-        println!(
-            "OpenAPI JSON documentation structure available at http://{}/openapi.json",
-            addr
-        );
-        println!(
-            "Graphical Swagger UI Dashboard active at http://{}/docs",
-            addr
-        );
+        println!("OpenAPI JSON available at http://{}/openapi.json", addr);
+        println!("Swagger UI active at http://{}/docs", addr);
 
         let shared_router = Arc::new(self.router);
         let shared_extensions = Arc::new(self.extensions);
 
-        // 3. Process requests over the long-lived socket connection stream loop
+        // 2. Broadcast channel to notify active connections when shutdown begins
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        // Track active connection tasks so we can wait for them to finish draining
+        let (active_conn_tx, mut active_conn_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        tokio::pin!(shutdown_signal);
+
         loop {
-            let (stream, _remote_addr) = listener.accept().await?;
-            let io = TokioIo::new(stream);
-            let router_clone = shared_router.clone();
-            let extensions_clone = shared_extensions.clone();
+            tokio::select! {
+                // Stop accepting new sockets when the shutdown signal fires
+                _ = &mut shutdown_signal => {
+                    println!("\n[SHUTDOWN] Signal received. Draining active connections...");
+                    let _ = shutdown_tx.send(true);
+                    break;
+                }
 
-            tokio::task::spawn(async move {
-                let service = service_fn(move |mut req: Request<Incoming>| {
-                    let router = router_clone.clone();
-                    let extensions = extensions_clone.clone();
-                    async move {
-                        req.extensions_mut().extend(extensions.as_ref().clone());
+                accept_res = listener.accept() => {
+                    let (stream, _remote_addr) = match accept_res {
+                        Ok(conn) => conn,
+                        Err(err) => {
+                            eprintln!("[WARN] Failed to accept TCP connection: {}", err);
+                            continue;
+                        }
+                    };
 
-                        // Intercept documentation payload tracking routes early
-                        if req.uri().path() == "/openapi.json" && req.method() == Method::GET {
-                            if let Some(wrapped_json) = extensions.get::<OpenApiJsonBytes>() {
-                                let body = http_body_util::Full::new(wrapped_json.0.clone())
-                                    .map_err(|e| match e {})
-                                    .boxed();
-                                return Ok::<_, hyper::Error>(
-                                    Response::builder()
-                                        .status(StatusCode::OK)
-                                        .header("Content-Type", "application/json")
-                                        .body(body)
-                                        .unwrap(),
-                                );
+                    let io = TokioIo::new(stream);
+                    let router_clone = shared_router.clone();
+                    let extensions_clone = shared_extensions.clone();
+                    let mut conn_shutdown_rx = shutdown_rx.clone();
+                    let conn_guard = active_conn_tx.clone();
+
+                    tokio::task::spawn(async move {
+                        let _guard = conn_guard; // Held until this connection finishes
+
+                        let service = service_fn(move |mut req: Request<Incoming>| {
+                            let router = router_clone.clone();
+                            let extensions = extensions_clone.clone();
+                            async move {
+                                req.extensions_mut().extend(extensions.as_ref().clone());
+
+                                if req.uri().path() == "/openapi.json" && req.method() == Method::GET
+                                    && let Some(wrapped_json) = extensions.get::<OpenApiJsonBytes>()
+                                {
+                                    let body = Full::new(wrapped_json.0.clone())
+                                        .map_err(|e| match e {})
+                                        .boxed();
+                                    return Ok::<_, hyper::Error>(
+                                        Response::builder()
+                                            .status(StatusCode::OK)
+                                            .header("Content-Type", "application/json")
+                                            .body(body)
+                                            .unwrap(),
+                                    );
+                                }
+
+                                if req.uri().path() == "/docs" && req.method() == Method::GET
+                                    && let Some(wrapped_html) = extensions.get::<SwaggerHtmlBytes>()
+                                {
+                                    let body = Full::new(wrapped_html.0.clone())
+                                        .map_err(|e| match e {})
+                                        .boxed();
+                                    return Ok::<_, hyper::Error>(
+                                        Response::builder()
+                                            .status(StatusCode::OK)
+                                            .header("Content-Type", "text/html; charset=utf-8")
+                                            .body(body)
+                                            .unwrap(),
+                                    );
+                                }
+
+                                Ok::<_, hyper::Error>(router.dispatch(req).await)
+                            }
+                        });
+
+                        let builder = auto::Builder::new(TokioExecutor::new());
+                        let conn = builder.serve_connection(io, service);
+                        tokio::pin!(conn);
+
+                        tokio::select! {
+                            res = conn.as_mut() => {
+                                if let Err(err) = res {
+                                    eprintln!("[ERROR] Connection error: {}", err);
+                                }
+                            }
+                            _ = conn_shutdown_rx.changed() => {
+                                // Tell Hyper to finish the current in-flight request and close HTTP/1.1 keep-alive
+                                conn.as_mut().graceful_shutdown();
+                                let _ = conn.await;
                             }
                         }
-
-                        if req.uri().path() == "/docs" && req.method() == Method::GET {
-                            if let Some(wrapped_html) = extensions.get::<SwaggerHtmlBytes>() {
-                                let body = http_body_util::Full::new(wrapped_html.0.clone())
-                                    .map_err(|e| match e {})
-                                    .boxed();
-                                return Ok::<_, hyper::Error>(
-                                    Response::builder()
-                                        .status(StatusCode::OK)
-                                        .header("Content-Type", "text/html; charset=utf-8")
-                                        .body(body)
-                                        .unwrap(),
-                                );
-                            }
-                        }
-
-                        // Dispatch standard app operations down into the matching router matrices
-                        Ok::<_, hyper::Error>(router.dispatch(req).await)
-                    }
-                });
-
-                let _ = auto::Builder::new(TokioExecutor::new())
-                    .serve_connection(io, service)
-                    .await;
-            });
+                    });
+                }
+            }
         }
+
+        // Drop our local sender and wait for all spawned connection guards to drop
+        drop(active_conn_tx);
+        let _ = active_conn_rx.recv().await;
+        println!("[SHUTDOWN] All connections drained. Server stopped cleanly.");
+
+        Ok(())
     }
 
-    /// Backwards-compatible runtime hook that wraps standard production deployments natively.
+    /// Keeps existing `serve_on_listener` compatible for tests (runs indefinitely until task abort).
+    pub async fn serve_on_listener(
+        self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.serve_with_graceful_shutdown(listener, std::future::pending())
+            .await
+    }
+
+    /// Production entrypoint that listens for `Ctrl+C` to trigger a graceful shutdown.
     pub async fn serve(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = self.bind_listener().await?;
-        self.serve_on_listener(listener).await
+        self.serve_with_graceful_shutdown(listener, async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
     }
 }
 
@@ -708,9 +623,17 @@ impl ApplicationBuilder {
         })
     }
 
-    pub fn route(self, registration_wrapper: fn(Self) -> Self) -> Self {
-        registration_wrapper(self)
+    /// Registers a struct implementing `#[derive(Schema)]` into the OpenAPI components dictionary.
+    pub fn register_schema<T: Schema>(mut self) -> Self {
+        self.router
+            .schemas
+            .insert(T::schema_name().to_string(), T::schema_object());
+        self
     }
+
+    // pub fn route(self, registration_wrapper: fn(Self) -> Self) -> Self {
+    //     registration_wrapper(self)
+    // }
 
     pub fn register_module(mut self, module: Module) -> Self {
         // 1. First, copy the metadata into the router before consuming module fields
@@ -744,6 +667,48 @@ impl ApplicationBuilder {
 
     pub fn middleware<M: Middleware>(mut self, middleware: M) -> Self {
         self.middleware.push(Arc::new(middleware));
+        self
+    }
+
+    /// Registers an `#[endpoint]` directly by its function name (e.g., `.route(create_item)`).
+    pub fn route<E: RegisterEndpoint>(self, endpoint: E) -> Self {
+        endpoint.register(self)
+    }
+}
+
+/// Trait implemented automatically by `#[endpoint]` on a companion unit struct
+/// matching the handler function's name.
+// pub trait RegisterEndpoint {
+//     fn register(self, builder: ApplicationBuilder) -> ApplicationBuilder;
+// }
+
+pub trait RegisterEndpoint {
+    fn register<R: EndpointRegistry>(self, registry: R) -> R;
+}
+
+/// Shared target implemented by `ApplicationBuilder` and `Module` for mounting endpoints.
+pub trait EndpointRegistry {
+    fn mount_endpoint(
+        self,
+        method: Method,
+        path: &'static str,
+        handler: HandlerFn,
+        meta: EndpointMetadata,
+    ) -> Self;
+}
+
+impl EndpointRegistry for ApplicationBuilder {
+    fn mount_endpoint(
+        mut self,
+        method: Method,
+        path: &'static str,
+        handler: HandlerFn,
+        meta: EndpointMetadata,
+    ) -> Self {
+        self.router
+            .metadata
+            .insert((method.clone(), path.to_string()), meta);
+        self.router.compile_and_add_route(method, path, handler);
         self
     }
 }

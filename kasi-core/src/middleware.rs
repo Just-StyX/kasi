@@ -5,8 +5,13 @@ use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
+
 use crate::{
-    BoxBody, BoxFuture, Error, HandlerFn, Router, error::RequestContext, openapi::EndpointMetadata,
+    BoxBody, BoxFuture, EndpointRegistry, Error, HandlerFn, RegisterEndpoint, Router,
+    error::RequestContext, openapi::EndpointMetadata,
 };
 
 pub type MiddleChain = Arc<
@@ -271,19 +276,6 @@ impl Module {
         self
     }
 
-    /// Attaches an entire child module under this routing scope group, combining endpoint definitions and OpenAPI specifications.
-    pub fn nest_with_docs(mut self, child_module: Module) -> Self {
-        // Merge the executable endpoint hooks (reusing your nesting wrapper above)
-        self = self.nest(child_module.clone());
-
-        // Merge and prefix the structural metadata tree layout components dynamically
-        for ((method, child_path), meta) in child_module.metadata {
-            let combined_path = format!("{}/{}", self.prefix, child_path.trim_start_matches('/'));
-            self.metadata.insert((method, combined_path), meta);
-        }
-        self
-    }
-
     /// Mounts an endpoint directly onto the current module group level scope.
     pub fn add_endpoint(mut self, method: http::Method, path: &str, handler: HandlerFn) -> Self {
         let localized_path = format!("{}/{}", self.prefix, path.trim_start_matches('/'));
@@ -291,27 +283,57 @@ impl Module {
         self
     }
 
+    pub fn wrap(mut self, layer: InternalMiddlewareLayer) -> Self {
+        self.middleware.push(layer);
+        self
+    }
+
+    /// Registers an `#[endpoint]` directly inside this module scope (e.g., `module.route(restock)`).
+    pub fn route<E: RegisterEndpoint>(self, endpoint: E) -> Self {
+        endpoint.register(self)
+    }
+
+    /// Attaches a child module under this routing scope, combining paths, parent middleware, and OpenAPI metadata.
+    pub fn nest_with_docs(mut self, child_module: Module) -> Self {
+        // 1. Merge and prefix OpenAPI metadata
+        for ((method, child_path), meta) in &child_module.metadata {
+            let combined_path = format!("{}/{}", self.prefix, child_path.trim_start_matches('/'));
+            self.metadata
+                .insert((method.clone(), combined_path), meta.clone());
+        }
+
+        // 2. Delegate endpoint & middleware wrapping to `nest`
+        self.nest(child_module)
+    }
+
     /// Attaches a child module sub-tree under this routing scope group,
-    /// dynamically prefixing paths and propagating error interception frameworks cleanly.
+    /// prefixing paths and wrapping child handlers with both child and parent middleware.
     pub fn nest(mut self, child_module: Module) -> Self {
         for (method, child_path, handler) in child_module.endpoints {
-            // 1. Maintain clean nested path segmentation trees
             let combined_path = format!("{}/{}", self.prefix, child_path.trim_start_matches('/'));
 
-            // 2. Propagate parent middleware down to child executions
+            // First apply the child module's own middleware
             let mut layered_handler = handler;
-            for parent_middleware in self.middleware.iter().rev() {
-                let current_layer = parent_middleware.run.clone();
-                let next_inner_handler = layered_handler.clone();
-
+            for child_mw in child_module.middleware.iter().rev() {
+                let current_layer = child_mw.run.clone();
+                let next_inner = layered_handler.clone();
                 layered_handler = Arc::new(move |req| {
-                    let inner = next_inner_handler.clone();
+                    let inner = next_inner.clone();
                     let next_node = Next {
-                        chain: Box::new(move |r| {
-                            // Intercept errors during deep module traversal executions
-                            let inner_clone = inner.clone();
-                            Box::pin(async move { inner_clone(r).await })
-                        }),
+                        chain: Box::new(move |r| inner(r)),
+                    };
+                    current_layer(req, next_node)
+                });
+            }
+
+            // Next wrap with this parent module's middleware
+            for parent_mw in self.middleware.iter().rev() {
+                let current_layer = parent_mw.run.clone();
+                let next_inner = layered_handler.clone();
+                layered_handler = Arc::new(move |req| {
+                    let inner = next_inner.clone();
+                    let next_node = Next {
+                        chain: Box::new(move |r| inner(r)),
                     };
                     current_layer(req, next_node)
                 });
@@ -322,9 +344,225 @@ impl Module {
         }
         self
     }
+}
 
-    pub fn wrap(mut self, layer: InternalMiddlewareLayer) -> Self {
-        self.middleware.push(layer);
-        self
+impl EndpointRegistry for Module {
+    fn mount_endpoint(
+        self,
+        method: http::Method,
+        path: &'static str,
+        handler: HandlerFn,
+        meta: EndpointMetadata,
+    ) -> Self {
+        self.add_endpoint_with_meta(method, path, handler, meta)
+    }
+}
+
+// Add to kasi-core/src/middleware.rs
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Pretty,
+    Json,
+}
+
+#[derive(Clone)]
+pub struct TracingMiddleware {
+    format: LogFormat,
+}
+
+impl TracingMiddleware {
+    /// Creates a new tracing middleware outputting human-readable structured lines.
+    pub fn new() -> Self {
+        Self {
+            format: LogFormat::Pretty,
+        }
+    }
+
+    /// Configures the middleware to emit newline-delimited JSON objects.
+    pub fn json() -> Self {
+        Self {
+            format: LogFormat::Json,
+        }
+    }
+}
+
+impl Default for TracingMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Middleware for TracingMiddleware {
+    fn handle(
+        &self,
+        mut req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let format = self.format;
+
+        Box::pin(async move {
+            let start = Instant::now();
+
+            // 1. Reuse existing RequestContext if injected upstream, otherwise build one
+            let ctx = req
+                .extensions()
+                .get::<RequestContext>()
+                .cloned()
+                .unwrap_or_else(|| RequestContext::from_request(&req));
+
+            let trace_id_str = ctx.trace_id().to_string();
+            let method = ctx.method().to_string();
+            let path = ctx.uri_path().to_string();
+
+            // 2. Store RequestContext in extensions so handlers and error formatters share the same trace_id
+            req.extensions_mut().insert(ctx);
+
+            // 3. Execute downstream middleware and route handler
+            let mut response = next(req).await;
+
+            // 4. Attach X-Request-Id to the outgoing response headers
+            if let Ok(header_val) = HeaderValue::from_str(&trace_id_str) {
+                response.headers_mut().insert(
+                    http::header::HeaderName::from_static("x-request-id"),
+                    header_val,
+                );
+            }
+
+            // 5. Compute duration and emit structured log entry
+            let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let status = response.status().as_u16();
+
+            match format {
+                LogFormat::Pretty => {
+                    println!(
+                        "[TRACE] trace_id={} method={} path={} status={} latency_ms={:.2}",
+                        trace_id_str, method, path, status, duration_ms
+                    );
+                }
+                LogFormat::Json => {
+                    let log_entry = serde_json::json!({
+                        "level": if status >= 500 { "ERROR" } else if status >= 400 { "WARN" } else { "INFO" },
+                        "trace_id": trace_id_str,
+                        "method": method,
+                        "path": path,
+                        "status": status,
+                        "latency_ms": (duration_ms * 100.0).round() / 100.0,
+                    });
+                    println!("{}", log_entry);
+                }
+            }
+
+            response
+        })
+    }
+}
+
+#[derive(Clone)]
+struct BucketState {
+    tokens: u32,
+    window_start: Instant,
+}
+
+/// In-memory fixed-window rate limiter implementing `Middleware`.
+#[derive(Clone)]
+pub struct RateLimitMiddleware {
+    max_requests: u32,
+    window: Duration,
+    buckets: Arc<Mutex<HashMap<String, BucketState>>>,
+}
+
+impl RateLimitMiddleware {
+    /// Allows `max_requests` per `window` for each client key.
+    pub fn new(max_requests: u32, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn extract_client_key(req: &Request<BoxBody>) -> String {
+        req.headers()
+            .get("x-forwarded-for")
+            .or_else(|| req.headers().get("x-real-ip"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "global-client".to_string())
+    }
+}
+
+impl Middleware for RateLimitMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let max_requests = self.max_requests;
+        let window = self.window;
+        let buckets = self.buckets.clone();
+
+        Box::pin(async move {
+            let client_key = Self::extract_client_key(&req);
+            let now = Instant::now();
+
+            let (allowed, remaining, reset_secs) = {
+                let mut map = buckets.lock().unwrap();
+                let entry = map.entry(client_key).or_insert(BucketState {
+                    tokens: max_requests,
+                    window_start: now,
+                });
+
+                if now.duration_since(entry.window_start) >= window {
+                    entry.tokens = max_requests;
+                    entry.window_start = now;
+                }
+
+                let elapsed = now.duration_since(entry.window_start);
+                let remaining_window = window.saturating_sub(elapsed).as_secs().max(1);
+
+                if entry.tokens > 0 {
+                    entry.tokens -= 1;
+                    (true, entry.tokens, remaining_window)
+                } else {
+                    (false, 0, remaining_window)
+                }
+            };
+
+            if !allowed {
+                let json_body = serde_json::json!({
+                    "type": "https://kasi.local",
+                    "title": "Too Many Requests",
+                    "status": 429,
+                    "detail": format!("Rate limit exceeded. Try again in {} seconds.", reset_secs),
+                });
+
+                let body = Full::new(Bytes::from(json_body.to_string()))
+                    .map_err(|e| match e {})
+                    .boxed();
+
+                return Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header("Content-Type", "application/problem+json")
+                    .header("X-RateLimit-Limit", max_requests.to_string())
+                    .header("X-RateLimit-Remaining", "0")
+                    .header("Retry-After", reset_secs.to_string())
+                    .body(body)
+                    .unwrap();
+            }
+
+            let mut response = next(req).await;
+            let headers = response.headers_mut();
+            if let Ok(limit_val) = HeaderValue::from_str(&max_requests.to_string()) {
+                headers.insert("x-ratelimit-limit", limit_val);
+            }
+            if let Ok(rem_val) = HeaderValue::from_str(&remaining.to_string()) {
+                headers.insert("x-ratelimit-remaining", rem_val);
+            }
+
+            response
+        })
     }
 }

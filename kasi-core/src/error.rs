@@ -4,9 +4,10 @@ pub use bytes::Bytes;
 use http::Request;
 pub use http::{Response, StatusCode};
 pub use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+// use hyper::body::Incoming;
 
 pub use crate::BoxBody;
+use crate::{BoxFuture, extract::FromRequest};
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -41,11 +42,19 @@ impl From<(&str, &str, uuid::Uuid)> for RequestContext {
 }
 
 impl RequestContext {
-    pub fn from_request(req: &Request<Incoming>) -> Self {
+    pub fn from_request<B>(req: &Request<B>) -> Self {
+        // Reuse incoming X-Request-Id header if valid UUID, otherwise mint a fresh v4 UUID
+        let trace_id = req
+            .headers()
+            .get("x-request-id")
+            .and_then(|val| val.to_str().ok())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .unwrap_or_else(uuid::Uuid::new_v4);
+
         Self {
             uri_path: req.uri().path().to_string(),
             method: req.method().to_string(),
-            trace_id: uuid::Uuid::new_v4(),
+            trace_id,
         }
     }
 
@@ -59,6 +68,22 @@ impl RequestContext {
 
     pub fn method(&self) -> &str {
         &self.method
+    }
+}
+
+impl FromRequest for RequestContext {
+    fn extract(
+        req: Request<BoxBody>,
+    ) -> BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+        Box::pin(async move {
+            let ctx = req
+                .extensions()
+                .get::<RequestContext>()
+                .cloned()
+                .unwrap_or_else(|| RequestContext::from_request(&req));
+
+            Ok((ctx, req))
+        })
     }
 }
 

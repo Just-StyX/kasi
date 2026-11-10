@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.10"
+version = "0.2.0"
 edition = "2024"
 authors = ["Justice Sam <fjaccobian@gmail.com>"]
 license = "MIT"
@@ -48,9 +48,9 @@ minijinja = { version = "3.0.5" }
 minijinja-embed = { version = "3.0.5" }
 uuid = { version = "1.29.0", features = ["v4", "serde"]}
 
-kasi-core = { version = "0.1.8", path = "./kasi-core" }
-kasi-security = { version = "0.1.8", path = "./kasi-security" }
-kasi-macros = { version = "0.1.8", path = "./kasi-macros" }
+kasi-core = { version = "0.2.0", path = "./kasi-core" }
+kasi-security = { version = "0.2.0", path = "./kasi-security" }
+kasi-macros = { version = "0.2.0", path = "./kasi-macros" }
 
 [package]
 name = "kasi-jb"
@@ -73,6 +73,9 @@ kasi-security = { workspace = true }
 http-body-util = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
+minijinja = { workspace = true }
+minijinja-embed = { workspace = true }
+uuid = { workspace = true }
 
 # Inherit from [workspace.dependencies] to make them visible in this crate's code
 http = { workspace = true }
@@ -90,4 +93,4 @@ reqwest = { version = "0.12.5", features = ["json"] }
 [features]
 default = ["postgres", "templates"]
 postgres = ["kasi-core/postgres", "dep:sqlx", "dep:sea-orm"]
-templates = []
+templates = ["kasi-core/templates"]

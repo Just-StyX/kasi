@@ -27,13 +27,23 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let fn_vis = &input_fn.vis;
     let fn_ident = &input_fn.sig.ident;
+    let inner_fn_ident = quote::format_ident!("__kasi_handler_{}", fn_ident);
     let fn_inputs = &input_fn.sig.inputs;
     let fn_block = &input_fn.block;
     let fn_output = &input_fn.sig.output;
 
     let auth_context_var = quote::format_ident!("__global_auth_context");
 
-    // 1. GENERATE SECURITY ENFORCEMENT CODE
+    // 0. EXTRACT OR INITIALIZE REQUEST CONTEXT FOR TRACING
+    let context_init_block = quote! {
+        let __req_ctx = __active_req
+            .extensions()
+            .get::<kasi_jb::prelude::RequestContext>()
+            .cloned()
+            .unwrap_or_else(|| kasi_jb::prelude::RequestContext::from_request(&__active_req));
+    };
+
+    // 1. GENERATE SECURITY ENFORCEMENT CODE (WITH TRACE CONTEXT)
     let security_check_block = if let Some(meta) = security_metadata {
         let required_roles = meta.roles;
         let required_scopes = meta.scopes;
@@ -41,7 +51,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             let #auth_context_var = match kasi_jb::prelude::AuthContext::verify(&__active_req, &[#(#required_roles),*], &[#(#required_scopes),*]).await {
                 Ok(ctx) => ctx,
-                Err(err) => return kasi_jb::prelude::IntoResponse::into_response(err),
+                Err(err) => return err.into_response_with_context(&__req_ctx),
             };
         }
     } else {
@@ -66,10 +76,10 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
-    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES
+    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES (WITH TRACE CONTEXT)
     let mut extraction_blocks = Vec::new();
     let mut handler_arguments = Vec::new();
-    let mut tx_variable_ident = None; // Track the exact index matching the Tx variable layout
+    let mut tx_variable_ident = None;
 
     for (index, arg) in fn_inputs.iter().enumerate() {
         if let FnArg::Typed(pat_type) = arg {
@@ -91,7 +101,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                 extraction_blocks.push(quote! {
                     let (#var_name, __updated_req) = match <#ty as kasi_jb::prelude::FromRequest>::extract(__active_req).await {
                         Ok(tuple_res) => tuple_res,
-                        Err(err) => return kasi_jb::prelude::IntoResponse::into_response(err),
+                        Err(err) => return err.into_response_with_context(&__req_ctx),
                     };
                     __active_req = __updated_req;
                 });
@@ -104,12 +114,11 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
     // 4. TRANSACTION ENFORCEMENT MATCH STRATEGY
     let execution_pipeline_block = if let Some(tx_ident) = tx_variable_ident {
         quote! {
-            match #fn_ident(#(#handler_arguments),*).await {
+            match #inner_fn_ident(#(#handler_arguments),*).await {
                 Ok(res) => {
                     if let Err(commit_err) = #tx_ident.0.commit().await {
-                        kasi_jb::prelude::IntoResponse::into_response(
-                            kasi_jb::prelude::Error::Internal(format!("Transaction commit routine failure: {}", commit_err))
-                        )
+                        kasi_jb::prelude::Error::Internal(format!("Transaction commit routine failure: {}", commit_err))
+                            .into_response_with_context(&__req_ctx)
                     } else {
                         kasi_jb::prelude::IntoResponse::into_response(res)
                     }
@@ -122,45 +131,44 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            match #fn_ident(#(#handler_arguments),*).await {
-                Ok(res) => kasi_jb::prelude::IntoResponse::into_response(res),
-                Err(err) => kasi_jb::prelude::IntoResponse::into_response(err),
-            }
+            kasi_jb::prelude::IntoResponse::into_response(#inner_fn_ident(#(#handler_arguments),*).await)
         }
     };
 
-    // 5. GENERATE A UNIQUE INTERNAL REGISTER IDENTIFIER HELPER FUNCTION
-    let reg_helper_ident = quote::format_ident!("__register_{}", fn_ident);
-
+    // 5. EXPAND UNIT STRUCT + HIDDEN HANDLER FUNCTION
     let expanded = quote! {
-        #fn_vis async fn #fn_ident(#fn_inputs) #fn_output #fn_block
-
         #[doc(hidden)]
+        #fn_vis async fn #inner_fn_ident(#fn_inputs) #fn_output #fn_block
+
         #[allow(non_camel_case_types)]
-        #fn_vis fn #reg_helper_ident(builder: kasi_jb::prelude::ApplicationBuilder) -> kasi_jb::prelude::ApplicationBuilder {
-            let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
-                Box::pin(async move {
-                    let (parts, incoming_body) = req.into_parts();
-                    let boxed_incoming_body = http_body_util::BodyExt::map_err(incoming_body, |e| hyper::Error::from(e)).boxed();
-                    let mut __active_req = http::Request::from_parts(parts, boxed_incoming_body);
+        #fn_vis struct #fn_ident;
 
-                    #security_check_block
-                    #(#extraction_blocks)*
+        impl kasi_jb::prelude::RegisterEndpoint for #fn_ident {
+            fn register<R: kasi_jb::prelude::EndpointRegistry>(self, registry: R) -> R {
+                let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
+                    Box::pin(async move {
+                        let (parts, incoming_body) = req.into_parts();
+                        let boxed_incoming_body = http_body_util::BodyExt::map_err(incoming_body, hyper::Error::from).boxed();
+                        let mut __active_req = http::Request::from_parts(parts, boxed_incoming_body);
 
-                    // FIXED: Interweave our execution pipeline block containing transaction rules!
-                    #execution_pipeline_block
-                })
-            });
+                        #context_init_block
+                        #security_check_block
+                        #(#extraction_blocks)*
 
-            let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
-            #(#doc_registrations)*
+                        #execution_pipeline_block
+                    })
+                });
 
-            builder.mount_endpoint(
-                kasi_jb::prelude::Method::#method_ident,
-                #path_lit,
-                wrapped_handler,
-                endpoint_meta
-            )
+                let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
+                #(#doc_registrations)*
+
+                registry.mount_endpoint(
+                    kasi_jb::prelude::Method::#method_ident,
+                    #path_lit,
+                    wrapped_handler,
+                    endpoint_meta
+                )
+            }
         }
     };
     TokenStream::from(expanded)
@@ -461,6 +469,150 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(Schema)]
+pub fn derive_schema(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let name_str = name.to_string();
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let mut property_insertions = Vec::new();
+    let mut required_fields = Vec::new();
+
+    if let Data::Struct(data_struct) = &input.data
+        && let Fields::Named(fields) = &data_struct.fields
+    {
+        for field in &fields.named {
+            let field_ident = field.ident.as_ref().unwrap();
+            let field_name = field_ident.to_string();
+            let (schema_tokens, is_optional) = map_rust_type_to_openapi(&field.ty);
+
+            property_insertions.push(quote! {
+                properties.insert(#field_name.to_string(), #schema_tokens);
+            });
+
+            if !is_optional {
+                required_fields.push(quote! {
+                    required.push(#field_name.to_string());
+                });
+            }
+        }
+    }
+
+    let expanded = quote! {
+        impl #impl_generics kasi_jb::prelude::Schema for #name #ty_generics #where_clause {
+            fn schema_name() -> &'static str {
+                #name_str
+            }
+
+            fn schema_object() -> kasi_jb::prelude::SchemaObject {
+                let mut properties = std::collections::HashMap::new();
+                let mut required = Vec::new();
+
+                #(#property_insertions)*
+                #(#required_fields)*
+
+                kasi_jb::prelude::SchemaObject {
+                    schema_type: Some("object".to_string()),
+                    properties: Some(properties),
+                    required: if required.is_empty() { None } else { Some(required) },
+                    ..Default::default()
+                }
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Helper that translates Rust AST types into OpenAPI 3.1.0 SchemaObject tokens.
+fn map_rust_type_to_openapi(ty: &syn::Type) -> (proc_macro2::TokenStream, bool) {
+    if let syn::Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        let ident_str = segment.ident.to_string();
+
+        // Handle Option<T> -> unwrap inner type and mark field as not required
+        if ident_str == "Option"
+            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+        {
+            let (inner_schema, _) = map_rust_type_to_openapi(inner_ty);
+            return (inner_schema, true);
+        }
+
+        // Handle Vec<T> -> array schema with inner items
+        if ident_str == "Vec"
+            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+        {
+            let (inner_schema, _) = map_rust_type_to_openapi(inner_ty);
+            return (
+                quote! {
+                    kasi_jb::prelude::SchemaObject {
+                        schema_type: Some("array".to_string()),
+                        items: Some(Box::new(#inner_schema)),
+                        ..Default::default()
+                    }
+                },
+                false,
+            );
+        }
+
+        // Handle primitive types and standard library types
+        let primitive_match = match ident_str.as_str() {
+            "String" | "str" => Some(("string", None)),
+            "Uuid" => Some(("string", Some("uuid"))),
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+                Some(("integer", None))
+            }
+            "f32" | "f64" => Some(("number", None)),
+            "bool" => Some(("boolean", None)),
+            _ => None,
+        };
+
+        if let Some((openapi_type, format_opt)) = primitive_match {
+            let format_tokens = match format_opt {
+                Some(fmt) => quote! { Some(#fmt.to_string()) },
+                None => quote! { None },
+            };
+            return (
+                quote! {
+                    kasi_jb::prelude::SchemaObject {
+                        schema_type: Some(#openapi_type.to_string()),
+                        format: #format_tokens,
+                        ..Default::default()
+                    }
+                },
+                false,
+            );
+        }
+
+        // Fallback: assume custom struct implementing `Schema` and link via `$ref`
+        let ref_path = format!("#/components/schemas/{}", ident_str);
+        return (
+            quote! {
+                kasi_jb::prelude::SchemaObject {
+                    reference: Some(#ref_path.to_string()),
+                    ..Default::default()
+                }
+            },
+            false,
+        );
+    }
+
+    // Default fallback for complex or unrecognized types
+    (
+        quote! {
+            kasi_jb::prelude::SchemaObject {
+                schema_type: Some("object".to_string()),
+                ..Default::default()
+            }
+        },
+        false,
+    )
 }
 
 // ====================
