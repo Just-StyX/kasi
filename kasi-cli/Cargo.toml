@@ -1,0 +1,18 @@
+[package]
+name = "kasi-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI project scaffolder for the Kasi async web framework."
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "kasi"
+path = "src/main.rs"
+
+[dependencies]

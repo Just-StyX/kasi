@@ -29,11 +29,13 @@ pub type BoxBody = combinators::BoxBody<Bytes, hyper::Error>;
 pub type HandlerFn =
     Arc<dyn Fn(Request<Incoming>) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>;
 
+pub mod cookies;
 pub mod error;
 pub mod extract;
 pub mod middleware;
 pub mod openapi;
 pub mod response;
+pub mod static_files;
 #[cfg(feature = "templates")]
 pub mod templates;
 

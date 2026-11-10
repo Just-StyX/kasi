@@ -515,3 +515,201 @@ async fn test_rate_limit_middleware_enforces_quota() {
     let r3 = client.get(&url).send().await.unwrap();
     assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn test_serve_dir_and_path_traversal_protection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp_dir = std::env::temp_dir().join(format!("kasi_static_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("app.css"), "body { color: red; }").unwrap();
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .serve_dir("/static", &temp_dir)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Valid CSS asset request
+    let ok_res = client
+        .get(&format!("http://{}/static/app.css", target_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_res.status(), StatusCode::OK);
+    assert_eq!(
+        ok_res
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/css; charset=utf-8"
+    );
+    assert_eq!(ok_res.text().await.unwrap(), "body { color: red; }");
+
+    // 2. Path traversal attempt sent directly over TCP so the client doesn't normalize `..`
+    let mut stream = tokio::net::TcpStream::connect(&target_addr).await.unwrap();
+    let raw_http = format!(
+        "GET /static/../Cargo.toml HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        target_addr
+    );
+    stream.write_all(raw_http.as_bytes()).await.unwrap();
+
+    let mut raw_response = String::new();
+    stream.read_to_string(&mut raw_response).await.unwrap();
+
+    assert!(
+        raw_response.starts_with("HTTP/1.1 403 Forbidden"),
+        "Expected 403 Forbidden, got: {}",
+        raw_response.lines().next().unwrap_or("")
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[endpoint(POST, "/upload")]
+async fn upload_handler(form: Multipart) -> JsonValue {
+    let title = form.fields.get("title").cloned().unwrap_or_default();
+    let file_info: Vec<_> = form
+        .files
+        .iter()
+        .map(|f| {
+            json!({
+                "field": f.field_name,
+                "filename": f.file_name,
+                "size": f.bytes.len(),
+            })
+        })
+        .collect();
+
+    json!({ "title": title, "files": file_info })
+}
+
+#[tokio::test]
+async fn test_multipart_file_upload_extractor() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .route(upload_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let boundary = "KasiTestBoundary123";
+    let body = format!(
+        "--{b}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nQuarterly Report\r\n\
+         --{b}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"report.txt\"\r\nContent-Type: text/plain\r\n\r\nHello Kasi!\r\n\
+         --{b}--\r\n",
+        b = boundary
+    );
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(&format!("http://{}/upload", target_addr))
+        .header(
+            "Content-Type",
+            format!("multipart/form-data; boundary={}", boundary),
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let data: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(data["title"], "Quarterly Report");
+    assert_eq!(data["files"][0]["filename"], "report.txt");
+    assert_eq!(data["files"][0]["size"], 11);
+}
+
+#[endpoint(POST, "/login")]
+async fn login_cookie_handler() -> Response<BoxBody> {
+    let mut res = "Logged in".into_response();
+    Cookie::new("session_id", "tok_998877")
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .max_age(3600)
+        .append_to_headers(res.headers_mut());
+    res
+}
+
+#[endpoint(GET, "/me")]
+async fn current_user_cookie(cookies: Cookies) -> JsonValue {
+    json!({
+        "session_id": cookies.get("session_id").unwrap_or("none")
+    })
+}
+
+#[tokio::test]
+async fn test_cookie_extraction_and_set_cookie_builder() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .route(login_cookie_handler)
+    .route(current_user_cookie)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Login sets `Set-Cookie` header
+    let login_res = client
+        .post(&format!("http://{}/login", target_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login_res.status(), StatusCode::OK);
+    let set_cookie = login_res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(set_cookie.contains("session_id=tok_998877"));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Strict"));
+
+    // 2. Subsequent request sends `Cookie` header and extracts it via `Cookies`
+    let me_res = client
+        .get(&format!("http://{}/me", target_addr))
+        .header("Cookie", "session_id=tok_998877; theme=dark")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me_res.status(), StatusCode::OK);
+    let body: serde_json::Value = me_res.json().await.unwrap();
+    assert_eq!(body["session_id"], "tok_998877");
+}

@@ -236,3 +236,145 @@ where
         })
     }
 }
+
+use std::collections::HashMap;
+
+/// Represents a single file uploaded via `multipart/form-data`.
+#[derive(Debug, Clone)]
+pub struct UploadedFile {
+    pub field_name: String,
+    pub file_name: Option<String>,
+    pub content_type: Option<String>,
+    pub bytes: bytes::Bytes,
+}
+
+/// Extracts parsed text fields and binary files from a `multipart/form-data` request.
+#[derive(Debug, Clone)]
+pub struct Multipart {
+    pub fields: HashMap<String, String>,
+    pub files: Vec<UploadedFile>,
+}
+
+impl FromRequest for Multipart {
+    fn extract(
+        req: Request<BoxBody>,
+    ) -> BoxFuture<'static, Result<(Self, Request<BoxBody>), Error>> {
+        Box::pin(async move {
+            let content_type = req
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| Error::BadRequest("Missing Content-Type header".into()))?
+                .to_string();
+
+            if !content_type.starts_with("multipart/form-data") {
+                return Err(Error::BadRequest(
+                    "Invalid Content-Type. Expected multipart/form-data".into(),
+                ));
+            }
+
+            let boundary = content_type
+                .split(';')
+                .find_map(|part| {
+                    let trimmed = part.trim();
+                    trimmed.strip_prefix("boundary=")
+                })
+                .map(|b| b.trim_matches('"').to_string())
+                .ok_or_else(|| Error::BadRequest("Missing multipart boundary parameter".into()))?;
+
+            let (parts, body_stream) = req.into_parts();
+            let collected = body_stream
+                .collect()
+                .await
+                .map_err(|e| Error::Internal(format!("Failed to read multipart stream: {}", e)))?;
+            let raw_bytes = collected.to_bytes();
+
+            let parsed = parse_multipart_body(&raw_bytes, &boundary)?;
+
+            let blank_body = http_body_util::Empty::<bytes::Bytes>::new()
+                .map_err(|e| match e {})
+                .boxed();
+            let finalized_req = Request::from_parts(parts, blank_body);
+
+            Ok((parsed, finalized_req))
+        })
+    }
+}
+
+fn parse_multipart_body(body: &[u8], boundary: &str) -> Result<Multipart, Error> {
+    let delimiter = format!("--{}", boundary).into_bytes();
+    let mut fields = HashMap::new();
+    let mut files = Vec::new();
+
+    // Split raw bytes by `--<boundary>`
+    let mut positions = Vec::new();
+    let mut i = 0;
+    while i + delimiter.len() <= body.len() {
+        if &body[i..i + delimiter.len()] == delimiter.as_slice() {
+            positions.push(i);
+            i += delimiter.len();
+        } else {
+            i += 1;
+        }
+    }
+
+    for window in positions.windows(2) {
+        let mut part = &body[window[0] + delimiter.len()..window[1]];
+        if part.starts_with(b"--") {
+            break;
+        }
+        if let Some(stripped) = part.strip_prefix(b"\r\n") {
+            part = stripped;
+        }
+        if let Some(stripped) = part.strip_suffix(b"\r\n") {
+            part = stripped;
+        }
+
+        // Separate part headers from part payload at `\r\n\r\n`
+        let header_end = part
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| Error::BadRequest("Malformed multipart part headers".into()))?;
+
+        let headers_str = std::str::from_utf8(&part[..header_end])
+            .map_err(|_| Error::BadRequest("Invalid UTF-8 in multipart headers".into()))?;
+        let payload = &part[header_end + 4..];
+
+        let mut field_name = None;
+        let mut file_name = None;
+        let mut part_content_type = None;
+
+        for line in headers_str.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("content-disposition:") {
+                for segment in line.split(';') {
+                    let s = segment.trim();
+                    if let Some(val) = s.strip_prefix("name=") {
+                        field_name = Some(val.trim_matches('"').to_string());
+                    } else if let Some(val) = s.strip_prefix("filename=") {
+                        file_name = Some(val.trim_matches('"').to_string());
+                    }
+                }
+            } else if lower.starts_with("content-type:") {
+                part_content_type = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
+        }
+
+        let name = field_name
+            .ok_or_else(|| Error::BadRequest("Multipart part missing field name".into()))?;
+
+        if file_name.is_some() {
+            files.push(UploadedFile {
+                field_name: name,
+                file_name,
+                content_type: part_content_type,
+                bytes: bytes::Bytes::copy_from_slice(payload),
+            });
+        } else {
+            let text_val = String::from_utf8_lossy(payload).to_string();
+            fields.insert(name, text_val);
+        }
+    }
+
+    Ok(Multipart { fields, files })
+}
