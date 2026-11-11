@@ -3,7 +3,10 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EndpointMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(rename = "requestBody", skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<RequestBodySpec>,
     pub responses: HashMap<String, ResponseSpec>,
 }
 
@@ -23,6 +26,30 @@ pub struct MediaTypeSpec {
 pub struct SchemaRef {
     #[serde(rename = "$ref")]
     pub reference: String,
+}
+
+// Global representation of the final generated Swagger Spec Sheet
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenApiSpec {
+    pub openapi: String,
+    pub info: InfoSpec,
+    pub paths: HashMap<String, HashMap<String, EndpointMetadata>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub components: Option<ComponentsSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfoSpec {
+    pub title: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestBodySpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub required: bool,
+    pub content: HashMap<String, MediaTypeSpec>,
 }
 
 /// Represents an OpenAPI 3.1.0 Schema definition for a struct or field.
@@ -59,8 +86,37 @@ impl EndpointMetadata {
     pub fn new() -> Self {
         Self {
             summary: None,
+            request_body: None,
             responses: HashMap::new(),
         }
+    }
+
+    pub fn with_summary(mut self, summary: &str) -> Self {
+        self.summary = Some(summary.to_string());
+        self
+    }
+
+    pub fn set_request_body(
+        &mut self,
+        json_model: &str,
+        description: Option<&str>,
+        required: bool,
+    ) {
+        let mut media_types = HashMap::new();
+        media_types.insert(
+            "application/json".to_string(),
+            MediaTypeSpec {
+                schema: SchemaRef {
+                    reference: format!("#/components/schemas/{}", json_model),
+                },
+            },
+        );
+
+        self.request_body = Some(RequestBodySpec {
+            description: description.map(|d| d.to_string()),
+            required,
+            content: media_types,
+        });
     }
 
     pub fn add_response(&mut self, status: u16, description: &str, json_model: Option<&str>) {
@@ -85,20 +141,4 @@ impl EndpointMetadata {
             },
         );
     }
-}
-
-// Global representation of the final generated Swagger Spec Sheet
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenApiSpec {
-    pub openapi: String,
-    pub info: InfoSpec,
-    pub paths: HashMap<String, HashMap<String, EndpointMetadata>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub components: Option<ComponentsSpec>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InfoSpec {
-    pub title: String,
-    pub version: String,
 }

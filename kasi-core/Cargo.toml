@@ -24,6 +24,10 @@ nom.workspace = true
 regex.workspace = true
 bytes.workspace = true
 uuid.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+sha1.workspace = true
+base64.workspace = true
 
 # Optional engines enabled conditionally under feature propagation boundaries
 sqlx = { workspace = true, optional = true }

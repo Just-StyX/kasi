@@ -60,7 +60,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    // 2. GENERATE OPENAPI DOCUMENTATION REGISTRATION CODE
+    // 2. GENERATE OPENAPI RESPONSE DOCUMENTATION REGISTRATION CODE
     let mut doc_registrations = Vec::new();
     for resp in response_metadata {
         let status = resp.status;
@@ -76,15 +76,21 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
-    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES (WITH TRACE CONTEXT)
+    // 3. PARAMETER & EXTRACTOR EVALUATION SEQUENCES (WITH TRACE CONTEXT & BODY DETECTION)
     let mut extraction_blocks = Vec::new();
     let mut handler_arguments = Vec::new();
     let mut tx_variable_ident = None;
+    let mut detected_body_model: Option<String> = None;
 
     for (index, arg) in fn_inputs.iter().enumerate() {
         if let FnArg::Typed(pat_type) = arg {
             let ty = &pat_type.ty;
             let var_name = quote::format_ident!("__extracted_arg_{}", index);
+
+            // FIXED: Detect Json<Model> or ValidatedJson<Model> while `ty` is in scope
+            if detected_body_model.is_none() {
+                detected_body_model = extract_json_body_model(ty);
+            }
 
             let is_auth_context = quote!(#ty).to_string().contains("AuthContext");
             let is_transaction = quote!(#ty).to_string().contains("Tx");
@@ -110,6 +116,22 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             handler_arguments.push(quote! { #var_name });
         }
     }
+
+    // 3b. BUILD OPENAPI REQUEST BODY REGISTRATION TOKENS
+    let request_body_registration = if let Some(rb) = parse_request_body_attribute(&input_fn.attrs)
+    {
+        let model = rb.json_model;
+        let req_flag = rb.required;
+        let desc_tokens = match rb.description {
+            Some(d) => quote! { Some(#d) },
+            None => quote! { None },
+        };
+        quote! { endpoint_meta.set_request_body(#model, #desc_tokens, #req_flag); }
+    } else if let Some(model) = detected_body_model {
+        quote! { endpoint_meta.set_request_body(#model, None, true); }
+    } else {
+        quote! {}
+    };
 
     // 4. TRANSACTION ENFORCEMENT MATCH STRATEGY
     let execution_pipeline_block = if let Some(tx_ident) = tx_variable_ident {
@@ -161,6 +183,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 let mut endpoint_meta = kasi_jb::prelude::EndpointMetadata::new();
                 #(#doc_registrations)*
+                #request_body_registration
 
                 registry.mount_endpoint(
                     kasi_jb::prelude::Method::#method_ident,
@@ -623,6 +646,12 @@ struct EndpointArgs {
     path: LitStr,
 }
 
+struct RequestBodyAttr {
+    json_model: String,
+    description: Option<String>,
+    required: bool,
+}
+
 fn parse_endpoint_args(tokens: proc_macro2::TokenStream) -> syn::Result<EndpointArgs> {
     struct ArgsParser {
         method: Ident,
@@ -750,4 +779,73 @@ fn parse_response_attribute(attrs: &[Attribute]) -> Vec<ResponseAttr> {
         }
     }
     responses
+}
+
+fn parse_request_body_attribute(attrs: &[Attribute]) -> Option<RequestBodyAttr> {
+    for attr in attrs {
+        if attr.path().is_ident("request_body") {
+            let mut json_model = None;
+            let mut description = None;
+            let mut required = true;
+
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("json") {
+                    let expr: Expr = meta.value()?.parse()?;
+                    if let Expr::Path(ExprPath { path, .. }) = &expr
+                        && let Some(ident) = path.get_ident()
+                    {
+                        json_model = Some(ident.to_string());
+                    } else if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) = expr
+                    {
+                        json_model = Some(s.value());
+                    }
+                } else if meta.path.is_ident("description") {
+                    let expr: Expr = meta.value()?.parse()?;
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) = expr
+                    {
+                        description = Some(s.value());
+                    }
+                } else if meta.path.is_ident("required") {
+                    let expr: Expr = meta.value()?.parse()?;
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Bool(b), ..
+                    }) = expr
+                    {
+                        required = b.value();
+                    }
+                }
+                Ok(())
+            });
+
+            if let Some(model) = json_model {
+                return Some(RequestBodyAttr {
+                    json_model: model,
+                    description,
+                    required,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Extracts inner type name from `Json<MyModel>` or `ValidatedJson<MyModel>`.
+fn extract_json_body_model(ty: &syn::Type) -> Option<String> {
+    if let syn::Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+    {
+        let outer = seg.ident.to_string();
+        if (outer == "Json" || outer == "ValidatedJson")
+            && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+            && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_path))) = args.args.first()
+            && let Some(inner_seg) = inner_path.path.segments.last()
+        {
+            return Some(inner_seg.ident.to_string());
+        }
+    }
+    None
 }

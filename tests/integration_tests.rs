@@ -713,3 +713,137 @@ async fn test_cookie_extraction_and_set_cookie_builder() {
     let body: serde_json::Value = me_res.json().await.unwrap();
     assert_eq!(body["session_id"], "tok_998877");
 }
+
+#[derive(Debug, Serialize, Deserialize, Schema)]
+struct CreateOrderDto {
+    pub item_id: uuid::Uuid,
+    pub quantity: u32,
+}
+
+#[endpoint(POST, "/orders/schema-check")]
+#[response(status = 201, description = "Order created")]
+async fn create_order_schema_endpoint(Json(body): Json<CreateOrderDto>) -> JsonValue {
+    json!({ "item_id": body.item_id, "qty": body.quantity })
+}
+
+#[tokio::test]
+async fn test_openapi_auto_request_body_schema() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .register_schema::<CreateOrderDto>()
+    .route(create_order_schema_endpoint)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let spec: serde_json::Value = reqwest::Client::new()
+        .get(&format!("http://{}/openapi.json", target_addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let req_body = &spec["paths"]["/orders/schema-check"]["post"]["requestBody"];
+    assert_eq!(req_body["required"], true);
+    assert_eq!(
+        req_body["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/CreateOrderDto"
+    );
+}
+
+#[tokio::test]
+async fn test_background_task_scheduler() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .schedule_task(
+        "heartbeat-counter",
+        std::time::Duration::from_millis(30),
+        move || {
+            let c = counter_clone.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            }
+        },
+    )
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+    assert!(counter.load(Ordering::SeqCst) >= 2);
+}
+
+#[endpoint(GET, "/ws/echo")]
+async fn ws_echo_handler(ws: WebSocketUpgrade) -> Response<BoxBody> {
+    ws.on_upgrade(|mut socket| async move {
+        while let Some(Ok(msg)) = socket.recv().await {
+            if let WsMessage::Text(txt) = msg {
+                let _ = socket.send_text(format!("echo: {}", txt)).await;
+                break;
+            }
+        }
+        let _ = socket.close().await;
+    })
+}
+
+#[tokio::test]
+async fn test_websocket_bidirectional_echo() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::connect_async;
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .route(ws_echo_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (mut ws_stream, _) = connect_async(format!("ws://{}/ws/echo", target_addr))
+        .await
+        .expect("Failed to connect WebSocket client");
+
+    ws_stream
+        .send(WsMessage::Text("hello kasi".into()))
+        .await
+        .unwrap();
+
+    let reply = ws_stream.next().await.unwrap().unwrap();
+    assert_eq!(reply.into_text().unwrap(), "echo: hello kasi");
+}

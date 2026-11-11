@@ -12,6 +12,8 @@ pub mod prelude {
             RateLimitMiddleware, RegisterRoute, TracingMiddleware,
         },
         static_files::ServeDir,
+        tasks::TaskScheduler,
+        ws::{WebSocket, WebSocketUpgrade, WsMessage},
     };
 
     pub use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};

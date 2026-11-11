@@ -27,10 +27,10 @@ Enable optional feature flags as needed in `Cargo.toml`:
 ```toml
 [dependencies]
 # Default enables both `postgres` (SeaORM + SQLx) and `templates` (MiniJinja)
-kasi-jb = "0.3.0"
+kasi-jb = "0.3.1"
 
 # Or opt into only what you need:
-# kasi-jb = { version = "0.3.0", default-features = false, features = ["templates"] }
+# kasi-jb = { version = "0.3.1", default-features = false, features = ["templates"] }
 ```
 
 ---
@@ -239,6 +239,34 @@ let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
     .middleware(RateLimitMiddleware::new(100, std::time::Duration::from_secs(60)))
     .middleware(CorsMiddleware::permissive())
     .register_module(api_v1)
+    .build()
+    .await?;
+```
+
+### 11. Bidirectional WebSockets
+Upgrade HTTP GET connections into full-duplex WebSockets with `WebSocketUpgrade`:
+
+```rust
+#[endpoint(GET, "/ws/echo")]
+async fn ws_echo(ws: WebSocketUpgrade) -> Response<BoxBody> {
+    ws.on_upgrade(|mut socket| async move {
+        while let Some(Ok(WsMessage::Text(text))) = socket.recv().await {
+            let _ = socket.send_text(format!("echo: {}", text)).await;
+        }
+        let _ = socket.close().await;
+    })
+}
+```
+
+### 12. Background Task Scheduling
+Schedule recurring interval workers on `ApplicationBuilder` (automatically stopped during graceful shutdown) or extract `Extension<TaskScheduler>` in handlers to spawn background jobs:
+
+```rust
+let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
+    .schedule_task("cache-cleanup", std::time::Duration::from_secs(60), || async {
+        println!("Running periodic maintenance...");
+    })
+    .route(ws_echo)
     .build()
     .await?;
 ```

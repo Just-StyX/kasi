@@ -17,6 +17,7 @@ use crate::middleware::{MiddleChain, Middleware};
 use crate::openapi::{
     ComponentsSpec, EndpointMetadata, InfoSpec, OpenApiSpec, Schema, SchemaObject,
 };
+use crate::tasks::TaskScheduler;
 use crate::{
     error::Error,
     middleware::{Module, Next},
@@ -36,8 +37,10 @@ pub mod middleware;
 pub mod openapi;
 pub mod response;
 pub mod static_files;
+pub mod tasks;
 #[cfg(feature = "templates")]
 pub mod templates;
+pub mod ws;
 
 #[derive(Clone)]
 struct OpenApiJsonBytes(pub bytes::Bytes);
@@ -278,6 +281,10 @@ impl Router {
         }
 
         if let Some(handler) = matched_handler {
+            if req.headers().contains_key(http::header::UPGRADE) {
+                let on_upgrade = hyper::upgrade::on(&mut req);
+                req.extensions_mut().insert(on_upgrade);
+            }
             // Hydrate both RequestContext and PathParams so handlers can extract either
             req.extensions_mut().insert(context_frame);
             req.extensions_mut().insert(PathParams(captured_params));
@@ -314,6 +321,7 @@ pub struct Application {
     router: Router,
     config: Config,
     extensions: Extensions,
+    scheduler: tasks::TaskScheduler,
 }
 
 impl Application {
@@ -442,6 +450,7 @@ impl Application {
 
         // 2. Broadcast channel to notify active connections when shutdown begins
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        self.scheduler.start_workers(shutdown_rx.clone());
         // Track active connection tasks so we can wait for them to finish draining
         let (active_conn_tx, mut active_conn_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -515,7 +524,7 @@ impl Application {
                         });
 
                         let builder = auto::Builder::new(TokioExecutor::new());
-                        let conn = builder.serve_connection(io, service);
+                        let conn = builder.serve_connection_with_upgrades(io, service);
                         tokio::pin!(conn);
 
                         tokio::select! {
@@ -567,6 +576,7 @@ pub struct ApplicationBuilder {
     pub(crate) router: Router,
     extensions: Extensions,
     middleware: Vec<Arc<dyn Middleware>>,
+    scheduler: tasks::TaskScheduler,
 }
 
 impl ApplicationBuilder {
@@ -576,6 +586,7 @@ impl ApplicationBuilder {
             router: Router::new(),
             extensions: Extensions::new(),
             middleware: Vec::new(),
+            scheduler: TaskScheduler::new(),
         }
     }
 
@@ -616,13 +627,33 @@ impl ApplicationBuilder {
 
     pub async fn build(self) -> Result<Application, Box<dyn std::error::Error + Send + Sync>> {
         let mut router = self.router;
+        let mut extensions = self.extensions;
         let middleware_chain = self.middleware;
+
+        // Allow handlers to extract `Extension<TaskScheduler>` to call `scheduler.spawn(...)`
+        extensions.insert(self.scheduler.clone());
+
         router.wrap_handles_with_middleware(middleware_chain);
         Ok(Application {
             router,
             config: self.config,
-            extensions: self.extensions,
+            extensions,
+            scheduler: self.scheduler,
         })
+    }
+
+    pub fn schedule_task<F, Fut>(
+        mut self,
+        name: impl Into<String>,
+        interval: std::time::Duration,
+        task: F,
+    ) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.scheduler = self.scheduler.every(name, interval, task);
+        self
     }
 
     /// Registers a struct implementing `#[derive(Schema)]` into the OpenAPI components dictionary.
@@ -677,12 +708,6 @@ impl ApplicationBuilder {
         endpoint.register(self)
     }
 }
-
-/// Trait implemented automatically by `#[endpoint]` on a companion unit struct
-/// matching the handler function's name.
-// pub trait RegisterEndpoint {
-//     fn register(self, builder: ApplicationBuilder) -> ApplicationBuilder;
-// }
 
 pub trait RegisterEndpoint {
     fn register<R: EndpointRegistry>(self, registry: R) -> R;
