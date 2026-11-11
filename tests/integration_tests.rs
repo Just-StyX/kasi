@@ -1014,3 +1014,77 @@ async fn test_observability_healthz_and_prometheus_metrics() {
     assert!(metrics_text.contains("kasi_http_responses_by_class_total{class=\"2xx\"} 2"));
     assert!(metrics_text.contains("kasi_http_in_flight_requests 1"));
 }
+
+#[endpoint(GET, "/slow")]
+async fn slow_endpoint() -> &'static str {
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    "finished"
+}
+
+#[tokio::test]
+async fn test_timeout_middleware_returns_408() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .middleware(TimeoutMiddleware::new(std::time::Duration::from_millis(30)))
+    .route(slow_endpoint)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let res = reqwest::Client::new()
+        .get(&format!("http://{}/slow", target_addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+}
+
+#[tokio::test]
+async fn test_api_key_and_bearer_token_middlewares() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .middleware(ApiKeyMiddleware::new("x-api-key", ["secret-key-123"]))
+    .middleware(BearerTokenMiddleware::new(["svc-token-abc"]))
+    .route(ping_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/ping", target_addr);
+
+    // 1. Missing headers -> 401 Unauthorized
+    let unauth = client.get(&url).send().await.unwrap();
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. Valid API Key + Valid Bearer Token -> 200 OK
+    let ok = client
+        .get(&url)
+        .header("x-api-key", "secret-key-123")
+        .header("Authorization", "Bearer svc-token-abc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+}

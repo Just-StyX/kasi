@@ -669,3 +669,51 @@ impl Middleware for CompressionMiddleware {
         })
     }
 }
+
+/// Aborts requests that exceed `duration` and returns an RFC 7807 `408 Request Timeout` response.
+#[derive(Clone)]
+pub struct TimeoutMiddleware {
+    duration: Duration,
+}
+
+impl TimeoutMiddleware {
+    pub fn new(duration: Duration) -> Self {
+        Self { duration }
+    }
+}
+
+impl Middleware for TimeoutMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let timeout_dur = self.duration;
+        let uri_path = req.uri().path().to_string();
+
+        Box::pin(async move {
+            match tokio::time::timeout(timeout_dur, next(req)).await {
+                Ok(response) => response,
+                Err(_) => {
+                    let json_body = serde_json::json!({
+                        "type": "https://kasi.local",
+                        "title": "Request Timeout",
+                        "status": 408,
+                        "detail": format!("Request exceeded maximum execution duration of {:?}", timeout_dur),
+                        "instance": uri_path,
+                    });
+
+                    let body = Full::new(Bytes::from(json_body.to_string()))
+                        .map_err(|e| match e {})
+                        .boxed();
+
+                    Response::builder()
+                        .status(StatusCode::REQUEST_TIMEOUT)
+                        .header("Content-Type", "application/problem+json")
+                        .body(body)
+                        .unwrap()
+                }
+            }
+        })
+    }
+}

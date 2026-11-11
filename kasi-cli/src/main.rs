@@ -1,37 +1,113 @@
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::process;
+use std::process::{self, Command};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 || args[1] != "new" {
-        eprintln!("Usage: kasi new <project-name>");
+    if args.len() < 2 {
+        print_usage();
         process::exit(1);
     }
 
-    let project_name = &args[2];
-    let root = Path::new(project_name);
+    match args[1].as_str() {
+        "new" => {
+            if args.len() < 3 {
+                eprintln!("Usage: kasi new <project-name>");
+                process::exit(1);
+            }
+            let project_name = &args[2];
+            let root = Path::new(project_name);
 
-    if root.exists() {
-        eprintln!("Error: Directory '{}' already exists.", project_name);
-        process::exit(1);
+            if root.exists() {
+                eprintln!("Error: Directory '{}' already exists.", project_name);
+                process::exit(1);
+            }
+            if let Err(err) = scaffold_project(root, project_name) {
+                eprintln!("Failed to create project: {}", err);
+                process::exit(1);
+            }
+
+            println!("Created new Kasi microservice in ./{}", project_name);
+            println!("\nNext steps:");
+            println!("  cd {}", project_name);
+            println!("  cargo run");
+            println!("\nEndpoints ready:");
+            println!("  GET  http://127.0.0");
+            println!("  GET  http://127.0.0health");
+            println!("  GET  http://127.0.0docs");
+        }
+        "migrate" => {
+            if args.len() < 3 {
+                eprintln!("Usage: kasi migrate <create <name> | up | revert | info>");
+                process::exit(1);
+            }
+            handle_migrate(&args[2..]);
+        }
+        _ => {
+            print_usage();
+            process::exit(1);
+        }
     }
+}
 
-    if let Err(err) = scaffold_project(root, project_name) {
-        eprintln!("Failed to create project: {}", err);
-        process::exit(1);
+fn handle_migrate(sub_args: &[String]) {
+    match sub_args[0].as_str() {
+        "create" => {
+            if sub_args.len() < 2 {
+                eprintln!("Usage: kasi migrate create <migration_name>");
+                process::exit(1);
+            }
+            let name = sub_args[1].replace(' ', "_").to_lowercase();
+            let dir = Path::new("migrations");
+            fs::create_dir_all(dir).expect("Failed to create migrations directory");
+
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let filename = format!("{}_{}.sql", ts, name);
+            let filepath = dir.join(&filename);
+
+            let template = format!(
+                "-- Migration: {}\n-- Created at: {}\n\n-- Write your SQL schema changes below:\n",
+                name, ts
+            );
+            fs::write(&filepath, template).expect("Failed to write migration file");
+            println!("Created migration: {}", filepath.display());
+        }
+        cmd @ ("up" | "revert" | "info") => {
+            let status = Command::new("sqlx").args(["migrate", cmd]).status();
+
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => process::exit(s.code().unwrap_or(1)),
+                Err(_) => {
+                    eprintln!("Error: `sqlx-cli` is not installed.");
+                    eprintln!(
+                        "Install it with: cargo install sqlx-cli --no-default-features --features postgres"
+                    );
+                    process::exit(1);
+                }
+            }
+        }
+        _ => {
+            eprintln!("Unknown migrate subcommand: {}", sub_args[0]);
+            process::exit(1);
+        }
     }
+}
 
-    println!("Created new Kasi microservice in ./{}", project_name);
-    println!("\nNext steps:");
-    println!("  cd {}", project_name);
-    println!("  cargo run");
-    println!("\nEndpoints ready:");
-    println!("  GET  http://127.0.0.1");
-    println!("  GET  http://127.0.0.1/health");
-    println!("  GET  http://127.0.0.1/docs");
+fn print_usage() {
+    eprintln!("Kasi Framework CLI");
+    eprintln!("\nUsage:");
+    eprintln!("  kasi new <project-name>          Scaffold a new Kasi microservice");
+    eprintln!("  kasi migrate create <name>       Create a new timestamped SQL migration");
+    eprintln!("  kasi migrate up                  Apply pending migrations via sqlx-cli");
+    eprintln!("  kasi migrate revert              Revert the last applied migration");
+    eprintln!("  kasi migrate info                List applied and pending migrations");
 }
 
 fn scaffold_project(root: &Path, name: &str) -> std::io::Result<()> {

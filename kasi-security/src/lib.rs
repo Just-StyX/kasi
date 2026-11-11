@@ -1,10 +1,16 @@
+use http::Response;
 use http::{Request, header};
 use kasi_core::BoxBody;
+use kasi_core::middleware::{MiddleChain, Middleware};
 use kasi_core::{error::Error, extract::FromRequest};
 use openidconnect::IssuerUrl;
 use openidconnect::JsonWebKey;
 use openidconnect::core::{CoreJsonWebKeySet, CoreProviderMetadata};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequiredRole(pub &'static str);
@@ -295,5 +301,94 @@ impl AuthContext {
 
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
+    }
+}
+
+/// Validates incoming requests against a set of authorized API keys in a custom header (e.g. `X-API-Key`).
+#[derive(Clone)]
+pub struct ApiKeyMiddleware {
+    header_name: String,
+    valid_keys: Arc<HashSet<String>>,
+}
+
+impl ApiKeyMiddleware {
+    pub fn new(
+        header_name: impl Into<String>,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let set = keys.into_iter().map(|k| k.into()).collect();
+        Self {
+            header_name: header_name.into().to_ascii_lowercase(),
+            valid_keys: Arc::new(set),
+        }
+    }
+}
+
+impl Middleware for ApiKeyMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let header_name = self.header_name.clone();
+        let valid_keys = self.valid_keys.clone();
+
+        Box::pin(async move {
+            let provided = req
+                .headers()
+                .get(&header_name)
+                .and_then(|v| v.to_str().ok());
+
+            match provided {
+                Some(key) if valid_keys.contains(key) => next(req).await,
+                Some(_) => kasi_core::response::IntoResponse::into_response(Error::Unauthorized(
+                    "Invalid API key provided.".into(),
+                )),
+                None => kasi_core::response::IntoResponse::into_response(Error::Unauthorized(
+                    format!("Missing required '{}' header.", header_name),
+                )),
+            }
+        })
+    }
+}
+
+/// Validates incoming `Authorization: Bearer <token>` headers against a static set of service tokens.
+#[derive(Clone)]
+pub struct BearerTokenMiddleware {
+    valid_tokens: Arc<HashSet<String>>,
+}
+
+impl BearerTokenMiddleware {
+    pub fn new(tokens: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            valid_tokens: Arc::new(tokens.into_iter().map(|t| t.into()).collect()),
+        }
+    }
+}
+
+impl Middleware for BearerTokenMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let valid_tokens = self.valid_tokens.clone();
+
+        Box::pin(async move {
+            let auth_val = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok());
+
+            match auth_val.and_then(|h| h.strip_prefix("Bearer ")) {
+                Some(token) if valid_tokens.contains(token.trim()) => next(req).await,
+                Some(_) => kasi_core::response::IntoResponse::into_response(Error::Unauthorized(
+                    "Invalid bearer token.".into(),
+                )),
+                None => kasi_core::response::IntoResponse::into_response(Error::Unauthorized(
+                    "Missing or malformed 'Authorization: Bearer <token>' header.".into(),
+                )),
+            }
+        })
     }
 }

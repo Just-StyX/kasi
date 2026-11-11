@@ -8,8 +8,8 @@ pub mod prelude {
         RegisterEndpoint, Router,
         cookies::{Cookie, Cookies, SameSite},
         middleware::{
-            CorsMiddleware, InternalMiddlewareLayer, LogFormat, MiddleChain, Module, Next,
-            RateLimitMiddleware, RegisterRoute, TracingMiddleware,
+            CompressionMiddleware, CorsMiddleware, InternalMiddlewareLayer, LogFormat, MiddleChain,
+            Module, Next, RateLimitMiddleware, RegisterRoute, TimeoutMiddleware, TracingMiddleware,
         },
         static_files::ServeDir,
         tasks::TaskScheduler,
@@ -17,7 +17,6 @@ pub mod prelude {
     };
 
     pub use kasi_core::metrics::{MetricsMiddleware, MetricsRegistry};
-    pub use kasi_core::middleware::CompressionMiddleware;
     pub use kasi_core::sse::{Sse, SseEvent};
 
     pub use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
@@ -35,7 +34,9 @@ pub mod prelude {
         Extension, FromRequest, Json, Multipart, Path, Query, UploadedFile, ValidatedJson,
     };
     pub use kasi_core::response::IntoResponse;
-    pub use kasi_security::{AuthContext, OAuth2, RequiredRole};
+    pub use kasi_security::{
+        ApiKeyMiddleware, AuthContext, BearerTokenMiddleware, OAuth2, OidcConfig, RequiredRole,
+    };
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::{Value as JsonValue, json};
 

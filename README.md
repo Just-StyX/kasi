@@ -31,10 +31,10 @@ Enable optional feature flags as needed in `Cargo.toml`:
 ```toml
 [dependencies]
 # Default enables both `postgres` (SeaORM + SQLx) and `templates` (MiniJinja)
-kasi-jb = "0.3.1"
+kasi-jb = "0.5.0"
 
 # Or opt into only what you need:
-# kasi-jb = { version = "0.3.1", default-features = false, features = ["templates"] }
+# kasi-jb = { version = "0.5.0", default-features = false, features = ["templates"] }
 ```
 
 ---
