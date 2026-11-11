@@ -1,3 +1,7 @@
+[![Crates.io](https://shields.io)](https://crates.io)
+[![Docs.rs](https://docs.rs)](https://docs.rs)
+[![License: MIT](https://shields.io)](LICENSE)
+
 # Kasi (`kasi-jb`)
 
 **Kasi** is an async, macro-driven web and microservice framework for Rust built on **Hyper 1.x** and **Tokio**. It combines compile-time route and schema generation with sequential request extractors, RFC 7807 error responses, OpenID Connect JWT verification, static file serving, multipart uploads, and zero-boilerplate OpenAPI 3.1 documentation.
@@ -267,6 +271,35 @@ let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
         println!("Running periodic maintenance...");
     })
     .route(ws_echo)
+    .build()
+    .await?;
+```
+### 13. Server-Sent Events (`Sse`)
+Stream real-time server events over `text/event-stream` using `Sse` and `SseEvent`:
+
+```rust
+#[endpoint(GET, "/events/ticks")]
+async fn live_ticks() -> Sse {
+    let stream = futures_util::stream::unfold(1u64, |count| async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let event = SseEvent::data(format!("tick #{}", count))
+            .event("heartbeat")
+            .id(count.to_string());
+        Some((Ok(event), count + 1))
+    });
+
+    Sse::new(stream)
+}
+```
+
+### 14. Response Compression & Prometheus Observability
+Enable automatic Gzip response compression and mount built-in `GET /healthz` and `GET /metrics` endpoints with a single builder call:
+
+```rust
+let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
+    .with_observability() // Mounts GET /healthz and GET /metrics
+    .middleware(CompressionMiddleware::new())
+    .route(live_ticks)
     .build()
     .await?;
 ```

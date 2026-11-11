@@ -5,6 +5,8 @@ use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 
+use flate2::{Compression, write::GzEncoder};
+use std::io::Write;
 use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
@@ -563,6 +565,107 @@ impl Middleware for RateLimitMiddleware {
             }
 
             response
+        })
+    }
+}
+
+/// Compresses HTTP response bodies using Gzip when `Accept-Encoding: gzip` is present.
+#[derive(Clone)]
+pub struct CompressionMiddleware {
+    min_size_bytes: usize,
+}
+
+impl CompressionMiddleware {
+    /// Compresses responses larger than `min_size_bytes` (defaults to 256 bytes).
+    pub fn new() -> Self {
+        Self {
+            min_size_bytes: 256,
+        }
+    }
+
+    pub fn min_size(mut self, bytes: usize) -> Self {
+        self.min_size_bytes = bytes;
+        self
+    }
+}
+
+impl Default for CompressionMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Middleware for CompressionMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let min_size = self.min_size_bytes;
+        let accepts_gzip = req
+            .headers()
+            .get(http::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("gzip"))
+            .unwrap_or(false);
+
+        Box::pin(async move {
+            let response = next(req).await;
+
+            // Skip compression if client doesn't support gzip, response is already encoded, or it's SSE/WebSocket
+            let is_sse = response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("text/event-stream"))
+                .unwrap_or(false);
+
+            if !accepts_gzip
+                || is_sse
+                || response.status() == StatusCode::SWITCHING_PROTOCOLS
+                || response
+                    .headers()
+                    .contains_key(http::header::CONTENT_ENCODING)
+            {
+                return response;
+            }
+
+            let (mut parts, body) = response.into_parts();
+            let collected = match body.collect().await {
+                Ok(c) => c.to_bytes(),
+                Err(_) => {
+                    return Response::from_parts(
+                        parts,
+                        Full::new(Bytes::new()).map_err(|e| match e {}).boxed(),
+                    );
+                }
+            };
+
+            if collected.len() < min_size {
+                return Response::from_parts(
+                    parts,
+                    Full::new(collected).map_err(|e| match e {}).boxed(),
+                );
+            }
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            if encoder.write_all(&collected).is_ok()
+                && let Ok(compressed) = encoder.finish()
+            {
+                parts.headers.remove(http::header::CONTENT_LENGTH);
+                parts.headers.insert(
+                    http::header::CONTENT_ENCODING,
+                    HeaderValue::from_static("gzip"),
+                );
+                return Response::from_parts(
+                    parts,
+                    Full::new(Bytes::from(compressed))
+                        .map_err(|e| match e {})
+                        .boxed(),
+                );
+            }
+
+            Response::from_parts(parts, Full::new(collected).map_err(|e| match e {}).boxed())
         })
     }
 }

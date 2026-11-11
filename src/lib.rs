@@ -16,6 +16,10 @@ pub mod prelude {
         ws::{WebSocket, WebSocketUpgrade, WsMessage},
     };
 
+    pub use kasi_core::metrics::{MetricsMiddleware, MetricsRegistry};
+    pub use kasi_core::middleware::CompressionMiddleware;
+    pub use kasi_core::sse::{Sse, SseEvent};
+
     pub use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 
     pub use hyper::body::Incoming;

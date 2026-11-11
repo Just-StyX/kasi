@@ -33,9 +33,11 @@ pub type HandlerFn =
 pub mod cookies;
 pub mod error;
 pub mod extract;
+pub mod metrics;
 pub mod middleware;
 pub mod openapi;
 pub mod response;
+pub mod sse;
 pub mod static_files;
 pub mod tasks;
 #[cfg(feature = "templates")]
@@ -222,7 +224,7 @@ impl Router {
         F: Fn(Request<BoxBody>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Response<BoxBody>> + Send + 'static,
     {
-        let wrapped_handler = Arc::new(move |req: Request<Incoming>| {
+        let wrapped_handler: HandlerFn = Arc::new(move |req: Request<Incoming>| {
             let (parts, body) = req.into_parts();
             let boxed_body = body.map_err(|e| hyper::Error::from(e)).boxed();
 
@@ -231,8 +233,8 @@ impl Router {
             Box::pin(fut) as BoxFuture<'static, Response<BoxBody>>
         });
 
-        self.routes
-            .insert((method, path.to_string()), wrapped_handler);
+        // Forward to `compile_and_add_route` so `self.routes` AND `self.regex_routes` are both populated
+        self.compile_and_add_route(method, path, wrapped_handler);
     }
 
     pub fn add_endpoint_with_meta(

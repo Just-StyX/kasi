@@ -83,3 +83,27 @@ jobs:
     - name: Publish Step 5 - CLI Scaffolder (kasi-cli)
       run: cargo publish --manifest-path kasi-cli/Cargo.toml
 
+  create-github-release:
+    name: Build Docs & Create GitHub Release
+    needs: publish-to-crates-io
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v5
+
+    - name: Setup Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Verify Documentation Builds Cleanly
+      run: cargo doc --workspace --no-deps --all-features
+      env:
+        RUSTDOCFLAGS: "-D warnings"
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true

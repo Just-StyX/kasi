@@ -847,3 +847,170 @@ async fn test_websocket_bidirectional_echo() {
     let reply = ws_stream.next().await.unwrap().unwrap();
     assert_eq!(reply.into_text().unwrap(), "echo: hello kasi");
 }
+
+// ==========================================
+// 6. SSE, GZIP COMPRESSION & METRICS TESTS
+// ==========================================
+
+#[endpoint(GET, "/events/stream")]
+async fn sse_test_stream() -> Sse {
+    use futures_util::stream;
+    use std::convert::Infallible;
+
+    let events = vec![
+        Ok::<SseEvent, Infallible>(SseEvent::data("first-msg").event("update").id("1")),
+        Ok::<SseEvent, Infallible>(SseEvent::data("second-msg").event("update").id("2")),
+    ];
+
+    Sse::new(stream::iter(events))
+}
+
+#[tokio::test]
+async fn test_server_sent_events_streaming() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .route(sse_test_stream)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&format!("http://{}/events/stream", target_addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("content-type").unwrap().to_str().unwrap(),
+        "text/event-stream"
+    );
+
+    let body_text = res.text().await.unwrap();
+    assert!(body_text.contains("id: 1\nevent: update\ndata: first-msg\n\n"));
+    assert!(body_text.contains("id: 2\nevent: update\ndata: second-msg\n\n"));
+}
+
+#[endpoint(GET, "/large-payload")]
+async fn large_payload_handler() -> String {
+    // Exceeds default 256-byte threshold so CompressionMiddleware applies gzip
+    "Kasi framework response compression verification string. ".repeat(20)
+}
+
+#[tokio::test]
+async fn test_gzip_response_compression_middleware() {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .middleware(CompressionMiddleware::new())
+    .route(large_payload_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&format!("http://{}/large-payload", target_addr))
+        .header("Accept-Encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("content-encoding")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "gzip"
+    );
+
+    let compressed_bytes = res.bytes().await.unwrap();
+    let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+    let mut decompressed = String::new();
+    decoder.read_to_string(&mut decompressed).unwrap();
+
+    assert_eq!(
+        decompressed,
+        "Kasi framework response compression verification string. ".repeat(20)
+    );
+}
+
+#[tokio::test]
+async fn test_observability_healthz_and_prometheus_metrics() {
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .with_observability()
+    .route(ping_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Check /healthz liveness endpoint
+    let health_res = client
+        .get(&format!("http://{}/healthz", target_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health_res.status(), StatusCode::OK);
+    let health_json: serde_json::Value = health_res.json().await.unwrap();
+    assert_eq!(health_json["status"], "healthy");
+
+    // 2. Hit an application route so metrics increment
+    let ping_res = client
+        .get(&format!("http://{}/ping", target_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ping_res.status(), StatusCode::OK);
+
+    // 3. Scrape /metrics Prometheus text exposition endpoint
+    let metrics_res = client
+        .get(&format!("http://{}/metrics", target_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(metrics_res.status(), StatusCode::OK);
+
+    let metrics_text = metrics_res.text().await.unwrap();
+    assert!(metrics_text.contains("# TYPE kasi_http_requests_total counter"));
+    assert!(metrics_text.contains("kasi_http_requests_total 3"));
+    assert!(metrics_text.contains("kasi_http_responses_by_class_total{class=\"2xx\"} 2"));
+    assert!(metrics_text.contains("kasi_http_in_flight_requests 1"));
+}
