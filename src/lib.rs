@@ -16,6 +16,12 @@ pub mod prelude {
         ws::{WebSocket, WebSocketUpgrade, WsMessage},
     };
 
+    #[cfg(feature = "graphql")]
+    pub use kasi_core::graphql::{GraphQLRequest, GraphQLResponse, graphiql_playground};
+
+    #[cfg(feature = "graphql")]
+    pub use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema as GraphQLSchema};
+
     pub use kasi_core::metrics::{MetricsMiddleware, MetricsRegistry};
     pub use kasi_core::sse::{Sse, SseEvent};
 

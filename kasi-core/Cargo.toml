@@ -35,6 +35,7 @@ sqlx = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 minijinja = { workspace = true, optional = true }
 minijinja-embed = { workspace = true, optional = true }
+async-graphql = { workspace = true, optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12.5", features = ["json"] }
@@ -42,3 +43,4 @@ reqwest = { version = "0.12.5", features = ["json"] }
 [features]
 postgres = ["dep:sea-orm", "dep:sqlx"]
 templates = ["dep:minijinja", "dep:minijinja-embed"]
+graphql = ["dep:async-graphql"]

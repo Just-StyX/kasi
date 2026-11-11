@@ -31,10 +31,10 @@ Enable optional feature flags as needed in `Cargo.toml`:
 ```toml
 [dependencies]
 # Default enables both `postgres` (SeaORM + SQLx) and `templates` (MiniJinja)
-kasi-jb = "0.5.0"
+kasi-jb = "0.5.1"
 
 # Or opt into only what you need:
-# kasi-jb = { version = "0.5.0", default-features = false, features = ["templates"] }
+# kasi-jb = { version = "0.5.1", default-features = false, features = ["templates", "graphql"] }
 ```
 
 ---
@@ -77,6 +77,19 @@ Use `#[endpoint(METHOD, "/path")]` to define async handlers and mount them direc
 #[endpoint(GET, "/items/{sku:[A-Z]{3}-\\d+}")]
 async fn get_item(Path(sku): Path<String>) -> JsonValue {
     json!({ "sku": sku, "in_stock": true })
+}
+
+#[endpoint(POST, "/graphql")]
+async fn graphql_handler(
+    Extension(schema): Extension<AppSchema>,
+    req: GraphQLRequest,
+) -> GraphQLResponse {
+    schema.execute(req.into_inner()).await.into()
+}
+
+#[endpoint(GET, "/graphiql")]
+async fn graphiql_ui() -> Response<BoxBody> {
+    graphiql_playground("/graphql")
 }
 ```
 

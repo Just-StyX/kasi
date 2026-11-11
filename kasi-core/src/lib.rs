@@ -33,6 +33,8 @@ pub type HandlerFn =
 pub mod cookies;
 pub mod error;
 pub mod extract;
+#[cfg(feature = "graphql")]
+pub mod graphql;
 pub mod metrics;
 pub mod middleware;
 pub mod openapi;
@@ -55,6 +57,7 @@ pub struct Router {
     pub metadata: HashMap<(Method, String), EndpointMetadata>,
     pub schemas: HashMap<String, SchemaObject>,
     pub(crate) regex_routes: Vec<RegexRoute>,
+    pub(crate) global_middleware: Vec<std::sync::Arc<dyn Middleware>>,
 }
 
 pub struct RegexRoute {
@@ -72,6 +75,7 @@ impl Router {
             metadata: HashMap::new(),
             schemas: HashMap::new(),
             regex_routes: Vec::new(),
+            global_middleware: Vec::new(),
         }
     }
 
@@ -306,6 +310,58 @@ impl Router {
             resp
         }
     }
+
+    pub async fn handle_with_middleware(
+        self: &std::sync::Arc<Self>,
+        req: Request<hyper::body::Incoming>,
+    ) -> Response<BoxBody> {
+        if self.global_middleware.is_empty() {
+            return self.dispatch(req).await;
+        }
+
+        let incoming_cell = std::sync::Arc::new(tokio::sync::Mutex::new(Some(req)));
+        let cell_for_inner = incoming_cell.clone();
+        let router_clone = self.clone();
+
+        let mut chain: MiddleChain = std::sync::Arc::new(move |req_box| {
+            let cell = cell_for_inner.clone();
+            let router = router_clone.clone();
+            Box::pin(async move {
+                let mut guard = cell.lock().await;
+                if let Some(mut native_req) = guard.take() {
+                    native_req
+                        .extensions_mut()
+                        .extend(req_box.extensions().clone());
+                    router.dispatch(native_req).await
+                } else {
+                    crate::response::IntoResponse::into_response(Error::Internal(
+                        "Request stream already consumed".into(),
+                    ))
+                }
+            })
+        });
+
+        for mw in self.global_middleware.iter().rev() {
+            let active_mw = mw.clone();
+            let next_chain = chain.clone();
+            chain = std::sync::Arc::new(move |r| active_mw.handle(r, next_chain.clone()));
+        }
+
+        let parts = {
+            let mut guard = incoming_cell.lock().await;
+            let orig = guard.take().unwrap();
+            let (p, b) = orig.into_parts();
+            *guard = Some(Request::from_parts(p.clone(), b));
+            p
+        };
+
+        let blank_body = http_body_util::Empty::<bytes::Bytes>::new()
+            .map_err(|e| match e {})
+            .boxed();
+        let mw_req = Request::from_parts(parts, blank_body);
+
+        chain(mw_req).await
+    }
 }
 
 impl Default for Router {
@@ -521,7 +577,7 @@ impl Application {
                                     );
                                 }
 
-                                Ok::<_, hyper::Error>(router.dispatch(req).await)
+                                Ok::<_, hyper::Error>(router.handle_with_middleware(req).await)
                             }
                         });
 
@@ -630,12 +686,11 @@ impl ApplicationBuilder {
     pub async fn build(self) -> Result<Application, Box<dyn std::error::Error + Send + Sync>> {
         let mut router = self.router;
         let mut extensions = self.extensions;
-        let middleware_chain = self.middleware;
 
         // Allow handlers to extract `Extension<TaskScheduler>` to call `scheduler.spawn(...)`
         extensions.insert(self.scheduler.clone());
+        router.global_middleware = self.middleware;
 
-        router.wrap_handles_with_middleware(middleware_chain);
         Ok(Application {
             router,
             config: self.config,

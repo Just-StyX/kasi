@@ -1088,3 +1088,171 @@ async fn test_api_key_and_bearer_token_middlewares() {
         .unwrap();
     assert_eq!(ok.status(), StatusCode::OK);
 }
+
+// ==========================================
+// 7. CORS PREFLIGHT & GRAPHQL TESTS
+// ==========================================
+
+#[tokio::test]
+async fn test_cors_preflight_options_and_origin_headers() {
+    let cors = CorsMiddleware::new()
+        .allow_origin("https://kasi.dev")
+        .allow_method(Method::GET)
+        .allow_method(Method::POST)
+        .allow_header("Content-Type")
+        .allow_header("Authorization")
+        .allow_credentials()
+        .max_age(3600);
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .middleware(cors)
+    .route(ping_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/ping", target_addr);
+
+    // 1. Send CORS Preflight OPTIONS request from allowed origin
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("Origin", "https://kasi.dev")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "https://kasi.dev"
+    );
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-credentials")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-max-age")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "3600"
+    );
+
+    // 2. Actual GET request from disallowed origin does NOT receive Allow-Origin header
+    let blocked_origin = client
+        .get(&url)
+        .header("Origin", "https://example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_origin.status(), StatusCode::OK);
+    assert!(
+        blocked_origin
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+}
+
+#[cfg(feature = "graphql")]
+mod graphql_tests {
+    use super::*;
+
+    struct QueryRoot;
+
+    #[Object]
+    impl QueryRoot {
+        async fn greeting(&self, name: String) -> String {
+            format!("Hello from GraphQL, {}!", name)
+        }
+    }
+
+    type AppSchema = GraphQLSchema<QueryRoot, EmptyMutation, EmptySubscription>;
+
+    #[endpoint(POST, "/graphql")]
+    async fn graphql_handler(
+        Extension(schema): Extension<AppSchema>,
+        req: GraphQLRequest,
+    ) -> GraphQLResponse {
+        schema.execute(req.into_inner()).await.into()
+    }
+
+    #[endpoint(GET, "/graphiql")]
+    async fn graphiql_ui() -> Response<BoxBody> {
+        graphiql_playground("/graphql")
+    }
+
+    #[tokio::test]
+    async fn test_graphql_query_and_graphiql_playground() {
+        let schema = GraphQLSchema::build(QueryRoot, EmptyMutation, EmptySubscription).finish();
+
+        let mut app = Application::builder(Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+        })
+        .extension(schema)
+        .route(graphql_handler)
+        .route(graphiql_ui)
+        .build()
+        .await
+        .unwrap();
+
+        let listener = app.bind_listener().await.unwrap();
+        let target_addr = app.local_addr();
+
+        tokio::task::spawn(async move {
+            let _ = app.serve_on_listener(listener).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+
+        // 1. Execute GraphQL POST query
+        let res = client
+            .post(&format!("http://{}/graphql", target_addr))
+            .json(&serde_json::json!({
+                "query": "{ greeting(name: \"Kasi\") }"
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(body["data"]["greeting"], "Hello from GraphQL, Kasi!");
+
+        // 2. Verify GraphiQL IDE serves HTML
+        let ui_res = client
+            .get(&format!("http://{}/graphiql", target_addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ui_res.status(), StatusCode::OK);
+        assert!(ui_res.text().await.unwrap().contains("GraphiQL"));
+    }
+}
