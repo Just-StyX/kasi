@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 authors = ["Justice Sam <fjaccobian@gmail.com>"]
 license = "MIT"
@@ -54,9 +54,9 @@ base64 = "0.23.1"
 flate2 = "1.1.11"
 async-graphql = "7.2.1"
 
-kasi-core = { version = "0.5.3", path = "./kasi-core" }
-kasi-security = { version = "0.5.3", path = "./kasi-security" }
-kasi-macros = { version = "0.5.3", path = "./kasi-macros" }
+kasi-core = { version = "0.5.4", path = "./kasi-core" }
+kasi-security = { version = "0.5.4", path = "./kasi-security" }
+kasi-macros = { version = "0.5.4", path = "./kasi-macros" }
 
 [package]
 name = "kasi-jb"

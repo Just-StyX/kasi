@@ -588,11 +588,17 @@ impl Application {
                         tokio::select! {
                             res = conn.as_mut() => {
                                 if let Err(err) = res {
-                                    eprintln!("[ERROR] Connection error: {}", err);
+                                    let is_benign = err
+                                        .downcast_ref::<hyper::Error>()
+                                        .map(|e| e.is_incomplete_message() || e.is_closed())
+                                        .unwrap_or(false);
+
+                                    if !is_benign {
+                                        eprintln!("[ERROR] Connection error: {}", err);
+                                    }
                                 }
                             }
                             _ = conn_shutdown_rx.changed() => {
-                                // Tell Hyper to finish the current in-flight request and close HTTP/1.1 keep-alive
                                 conn.as_mut().graceful_shutdown();
                                 let _ = conn.await;
                             }
