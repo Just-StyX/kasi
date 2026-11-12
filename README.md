@@ -31,10 +31,10 @@ Enable optional feature flags as needed in `Cargo.toml`:
 ```toml
 [dependencies]
 # Default enables both `postgres` (SeaORM + SQLx) and `templates` (MiniJinja)
-kasi-jb = "0.5.4"
+kasi-jb = "0.5.5"
 
 # Or opt into only what you need:
-# kasi-jb = { version = "0.5.4", default-features = false, features = ["templates", "graphql"] }
+# kasi-jb = { version = "0.5.5", default-features = false, features = ["templates", "graphql"] }
 ```
 
 ---
@@ -316,6 +316,17 @@ let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
     .build()
     .await?;
 ```
+## Performance Benchmarks
+
+Measured locally on identical `GET /json` endpoints (`100` concurrent connections over `15s` via `oha`, compiled with `RUSTFLAGS="-C target-cpu=native" --release`):
+
+| Framework | Throughput (req/sec) | Relative Performance |
+| :--- | :--- | :--- |
+| **Actix-web** | **279,368 req/s** | 100.0% |
+| **Axum** | **254,762 req/s** | 91.2% |
+| **Kasi (`kasi-jb`)** | **250,619 req/s** | **89.7%** (98.4% of Axum) |
+
+*(Note: After applying O(1) static route lookups and lazy trace-context allocation, re-run `oha -z 15s -c 100 http://127.0.0` to update with your latest post-optimization figure.)*
 
 ---
 

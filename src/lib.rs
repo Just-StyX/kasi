@@ -7,6 +7,7 @@ pub use http;
 pub use http_body_util;
 pub use hyper;
 pub use tokio;
+pub use uuid;
 
 pub mod prelude {
     pub use kasi_core::{
@@ -37,6 +38,7 @@ pub mod prelude {
     pub use hyper;
     pub use hyper::body::Incoming;
     pub use tokio;
+    pub use uuid;
 
     pub use bytes::Bytes;
     pub use http_body_util::{BodyExt, Full};

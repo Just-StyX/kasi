@@ -34,13 +34,24 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
 
     let auth_context_var = quote::format_ident!("__global_auth_context");
 
-    // 0. EXTRACT OR INITIALIZE REQUEST CONTEXT FOR TRACING
+    // 0. CAPTURE CHEAP METADATA REFERENCES (Zero heap allocation on the happy path!)
     let context_init_block = quote! {
-        let __req_ctx = __active_req
+        let __existing_ctx = __active_req
             .extensions()
             .get::<kasi_jb::prelude::RequestContext>()
-            .cloned()
-            .unwrap_or_else(|| kasi_jb::prelude::RequestContext::from_request(&__active_req));
+            .cloned();
+        let __fallback_uri = __active_req.uri().clone();
+        let __fallback_method = __active_req.method().clone();
+
+        let __build_err_ctx = || -> kasi_jb::prelude::RequestContext {
+            __existing_ctx.clone().unwrap_or_else(|| {
+                kasi_jb::prelude::RequestContext::from((
+                    __fallback_uri.path(),
+                    __fallback_method.as_str(),
+                    kasi_jb::uuid::Uuid::new_v4(),
+                ))
+            })
+        };
     };
 
     // 1. GENERATE SECURITY ENFORCEMENT CODE (WITH TRACE CONTEXT)
@@ -51,7 +62,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             let #auth_context_var = match kasi_jb::prelude::AuthContext::verify(&__active_req, &[#(#required_roles),*], &[#(#required_scopes),*]).await {
                 Ok(ctx) => ctx,
-                Err(err) => return err.into_response_with_context(&__req_ctx),
+                Err(err) => return err.into_response_with_context(&__build_err_ctx()),
             };
         }
     } else {
@@ -87,7 +98,6 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
             let ty = &pat_type.ty;
             let var_name = quote::format_ident!("__extracted_arg_{}", index);
 
-            // FIXED: Detect Json<Model> or ValidatedJson<Model> while `ty` is in scope
             if detected_body_model.is_none() {
                 detected_body_model = extract_json_body_model(ty);
             }
@@ -107,7 +117,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                 extraction_blocks.push(quote! {
                     let (#var_name, __updated_req) = match <#ty as kasi_jb::prelude::FromRequest>::extract(__active_req).await {
                         Ok(tuple_res) => tuple_res,
-                        Err(err) => return err.into_response_with_context(&__req_ctx),
+                        Err(err) => return err.into_response_with_context(&__build_err_ctx()),
                     };
                     __active_req = __updated_req;
                 });
@@ -140,7 +150,7 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                 Ok(res) => {
                     if let Err(commit_err) = #tx_ident.0.commit().await {
                         kasi_jb::prelude::Error::Internal(format!("Transaction commit routine failure: {}", commit_err))
-                            .into_response_with_context(&__req_ctx)
+                            .into_response_with_context(&__build_err_ctx())
                     } else {
                         kasi_jb::prelude::IntoResponse::into_response(res)
                     }
@@ -170,7 +180,10 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                 let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
                     Box::pin(async move {
                         let (parts, incoming_body) = req.into_parts();
-                        let boxed_incoming_body = kasi_jb::http_body_util::BodyExt::map_err(incoming_body, hyper::Error::from).boxed();
+                        let boxed_incoming_body = kasi_jb::http_body_util::BodyExt::map_err(
+                            incoming_body,
+                            kasi_jb::hyper::Error::from,
+                        ).boxed();
                         let mut __active_req = kasi_jb::http::Request::from_parts(parts, boxed_incoming_body);
 
                         #context_init_block

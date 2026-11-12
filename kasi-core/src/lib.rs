@@ -55,6 +55,7 @@ struct SwaggerHtmlBytes(pub bytes::Bytes);
 pub struct Router {
     pub(crate) routes: HashMap<(Method, String), HandlerFn>,
     pub metadata: HashMap<(Method, String), EndpointMetadata>,
+    pub(crate) static_routes: HashMap<(Method, String), HandlerFn>,
     pub schemas: HashMap<String, SchemaObject>,
     pub(crate) regex_routes: Vec<RegexRoute>,
     pub(crate) global_middleware: Vec<std::sync::Arc<dyn Middleware>>,
@@ -73,6 +74,7 @@ impl Router {
         Self {
             routes: HashMap::new(),
             metadata: HashMap::new(),
+            static_routes: HashMap::new(),
             schemas: HashMap::new(),
             regex_routes: Vec::new(),
             global_middleware: Vec::new(),
@@ -90,6 +92,13 @@ impl Router {
         // Register flat key fallback state
         self.routes
             .insert((method.clone(), path.to_string()), handler.clone());
+
+        let is_dynamic = path.contains('{') || path.split('/').any(|s| s.starts_with(':'));
+        if !is_dynamic {
+            self.static_routes
+                .insert((method, path.to_string()), handler);
+            return;
+        }
 
         let mut regex_pattern = String::new();
         let mut param_names = Vec::new();
@@ -254,29 +263,32 @@ impl Router {
     }
 
     pub async fn dispatch(&self, mut req: Request<hyper::body::Incoming>) -> Response<BoxBody> {
-        let method = req.method().clone();
+        let method = req.method();
         let req_path = req.uri().path();
 
-        // Reuse existing RequestContext if injected upstream, otherwise create one
-        let context_frame = req
-            .extensions()
-            .get::<error::RequestContext>()
-            .cloned()
-            .unwrap_or_else(|| error::RequestContext::from_request(&req));
+        // 1. O(1) Fast-Path for static routes (zero regex matching, zero HashMap/UUID allocation)
+        if let Some(handler) = self
+            .static_routes
+            .get(&(method.clone(), req_path.to_string()))
+        {
+            if req.headers().contains_key(http::header::UPGRADE) {
+                let on_upgrade = hyper::upgrade::on(&mut req);
+                req.extensions_mut().insert(on_upgrade);
+            }
+            return handler(req).await;
+        }
 
+        // 2. Dynamic regex route matching
         let mut matched_handler = None;
         let mut captured_params = std::collections::HashMap::new();
 
-        // Iterate through compiled regex tracks in order of configuration registration
         for route in &self.regex_routes {
-            if route.method != method {
+            if &route.method != method {
                 continue;
             }
 
             if let Some(captures) = route.compiled_regex.captures(req_path) {
                 matched_handler = Some(&route.handler);
-
-                // Extract all registered capture group variables dynamically
                 for name in &route.param_names {
                     if let Some(matched_group) = captures.name(name) {
                         captured_params.insert(name.clone(), matched_group.as_str().to_string());
@@ -291,18 +303,22 @@ impl Router {
                 let on_upgrade = hyper::upgrade::on(&mut req);
                 req.extensions_mut().insert(on_upgrade);
             }
-            // Hydrate both RequestContext and PathParams so handlers can extract either
-            req.extensions_mut().insert(context_frame);
             req.extensions_mut().insert(PathParams(captured_params));
             handler(req).await
         } else {
+            // Only allocate RequestContext + UUID when a 404 error actually occurs
+            let context_frame = req
+                .extensions()
+                .get::<error::RequestContext>()
+                .cloned()
+                .unwrap_or_else(|| error::RequestContext::from_request(&req));
+
             let mut resp = Error::NotFound(format!(
                 "No matching route rule sequence identified for {} {}",
                 method, req_path
             ))
             .into_response_with_context(&context_frame);
 
-            // Echo the trace_id on 404 responses so clients can correlate unmatched routes
             if let Ok(val) = http::HeaderValue::from_str(&context_frame.trace_id().to_string()) {
                 resp.headers_mut()
                     .insert(http::header::HeaderName::from_static("x-request-id"), val);
@@ -545,7 +561,10 @@ impl Application {
                             let router = router_clone.clone();
                             let extensions = extensions_clone.clone();
                             async move {
+                            if !extensions.is_empty() {
                                 req.extensions_mut().extend(extensions.as_ref().clone());
+                            }
+                                // req.extensions_mut().extend(extensions.as_ref().clone());
 
                                 if req.uri().path() == "/openapi.json" && req.method() == Method::GET
                                     && let Some(wrapped_json) = extensions.get::<OpenApiJsonBytes>()
