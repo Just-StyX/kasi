@@ -170,8 +170,8 @@ pub fn endpoint(args: TokenStream, input: TokenStream) -> TokenStream {
                 let wrapped_handler: kasi_jb::prelude::HandlerFn = std::sync::Arc::new(|req| {
                     Box::pin(async move {
                         let (parts, incoming_body) = req.into_parts();
-                        let boxed_incoming_body = http_body_util::BodyExt::map_err(incoming_body, hyper::Error::from).boxed();
-                        let mut __active_req = http::Request::from_parts(parts, boxed_incoming_body);
+                        let boxed_incoming_body = kasi_jb::http_body_util::BodyExt::map_err(incoming_body, hyper::Error::from).boxed();
+                        let mut __active_req = kasi_jb::http::Request::from_parts(parts, boxed_incoming_body);
 
                         #context_init_block
                         #security_check_block
@@ -283,7 +283,7 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                         });
 
                         let body_bytes = bytes::Bytes::from(json_payload.to_string());
-                        let boxed_body = http_body_util::Full::new(body_bytes)
+                        let boxed_body = kasi_jb::http_body_util::Full::new(body_bytes)
                             .map_err(|e| match e {})
                             .boxed();
 
@@ -309,7 +309,7 @@ pub fn derive_into_response(input: TokenStream) -> TokenStream {
                             Err(e) => format!(r#"{{"error": "Serialization failure: {}"}}"#, e),
                         };
 
-                        let body = http_body_util::Full::new(bytes::Bytes::from(json_string))
+                        let body = kasi_jb::http_body_util::Full::new(bytes::Bytes::from(json_string))
                             .map_err(|e| match e {})
                             .boxed();
 

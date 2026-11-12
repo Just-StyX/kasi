@@ -2,6 +2,12 @@ pub use kasi_core as kcore;
 pub use kasi_macros::*;
 pub use kasi_security as ksecure;
 
+pub use bytes;
+pub use http;
+pub use http_body_util;
+pub use hyper;
+pub use tokio;
+
 pub mod prelude {
     pub use kasi_core::{
         Application, ApplicationBuilder, BoxBody, Config, EndpointRegistry, HandlerFn, PathParams,
@@ -27,6 +33,7 @@ pub mod prelude {
 
     pub use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 
+    pub use hyper;
     pub use hyper::body::Incoming;
 
     pub use bytes::Bytes;
