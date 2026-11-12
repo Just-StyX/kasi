@@ -346,22 +346,29 @@ let webhooks = Module::new("/webhooks")
             <section id="benchmarks">
                 <h2>Performance Benchmarks</h2>
                 <p>
-                    Benchmarked on identical <code>GET /json</code> endpoints
-                    (100 concurrent connections, 15s duration via
-                    <code>oha</code>, compiled with <code>--release</code>):
+                    Measured locally on identical
+                    <code>GET /json</code> endpoints (<code>100</code>
+                    concurrent connections over <code>15s</code> via
+                    <code>oha</code>, compiled with
+                    <code>RUSTFLAGS="-C target-cpu=native" --release</code>):
                 </p>
                 <div class="grid">
                     <div class="card">
                         <h3>Actix-web</h3>
-                        <p><strong>279,368 req/sec</strong> (Baseline)</p>
-                    </div>
-                    <div class="card">
-                        <h3>Axum</h3>
-                        <p><strong>254,762 req/sec</strong> (91.2%)</p>
+                        <p>
+                            <strong>277,310 req/sec</strong> (100.0% Baseline)
+                        </p>
                     </div>
                     <div class="card">
                         <h3>Kasi (kasi-jb)</h3>
-                        <p><strong>250,619 req/sec</strong> (98.4% of Axum)</p>
+                        <p>
+                            <strong>258,841 req/sec</strong> (93.3% &bull;
+                            <strong>101.7% of Axum</strong>)
+                        </p>
+                    </div>
+                    <div class="card">
+                        <h3>Axum</h3>
+                        <p><strong>254,451 req/sec</strong> (91.8%)</p>
                     </div>
                 </div>
             </section>
