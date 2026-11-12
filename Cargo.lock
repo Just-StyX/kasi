@@ -1988,11 +1988,11 @@ dependencies = [
 
 [[package]]
 name = "kasi-cli"
-version = "0.5.2"
+version = "0.5.3"
 
 [[package]]
 name = "kasi-core"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "async-graphql",
  "base64 0.23.1",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-jb"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "async-graphql",
  "base64 0.23.1",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-macros"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "proc-macro-error",
  "proc-macro2",
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "kasi-security"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "http",
  "http-body-util",

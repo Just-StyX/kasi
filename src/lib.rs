@@ -33,8 +33,10 @@ pub mod prelude {
 
     pub use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 
+    pub use bytes;
     pub use hyper;
     pub use hyper::body::Incoming;
+    pub use tokio;
 
     pub use bytes::Bytes;
     pub use http_body_util::{BodyExt, Full};
