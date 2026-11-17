@@ -31,6 +31,7 @@ pub type HandlerFn =
     Arc<dyn Fn(Request<Incoming>) -> BoxFuture<'static, Response<BoxBody>> + Send + Sync>;
 
 pub mod cookies;
+pub mod env_config;
 pub mod error;
 pub mod extract;
 #[cfg(feature = "graphql")]

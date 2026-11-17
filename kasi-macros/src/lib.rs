@@ -563,7 +563,182 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+#[proc_macro_derive(FromEnv, attributes(env))]
+pub fn derive_from_env(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let struct_ident = &input.ident;
+
+    // 1. Parse optional struct-level `#[env(prefix = "APP")]`
+    let mut prefix: Option<String> = None;
+    for attr in &input.attrs {
+        if attr.path().is_ident("env") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("prefix") {
+                    let expr: Expr = meta.value()?.parse()?;
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(s), ..
+                    }) = expr
+                    {
+                        prefix = Some(s.value());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
+
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(named) => &named.named,
+            _ => {
+                return syn::Error::new_spanned(
+                    struct_ident,
+                    "#[derive(FromEnv)] only supports structs with named fields",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(
+                struct_ident,
+                "#[derive(FromEnv)] can only be derived on structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let mut field_inits = Vec::new();
+
+    for field in fields {
+        let field_ident = field.ident.as_ref().unwrap();
+        let field_ty = &field.ty;
+
+        let mut custom_key: Option<String> = None;
+        let mut default_val: Option<String> = None;
+
+        for attr in &field.attrs {
+            if attr.path().is_ident("env") {
+                let _ = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("key") {
+                        let expr: Expr = meta.value()?.parse()?;
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = expr
+                        {
+                            custom_key = Some(s.value());
+                        }
+                    } else if meta.path.is_ident("default") {
+                        let expr: Expr = meta.value()?.parse()?;
+                        if let Expr::Lit(ExprLit {
+                            lit: Lit::Str(s), ..
+                        }) = expr
+                        {
+                            default_val = Some(s.value());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        let env_var_name = if let Some(k) = custom_key {
+            k
+        } else {
+            let upper = field_ident.to_string().to_ascii_uppercase();
+            match &prefix {
+                Some(p) if !p.is_empty() => format!("{}_{}", p.to_ascii_uppercase(), upper),
+                _ => upper,
+            }
+        };
+
+        // Check if field type is `Option<Inner>`
+        let inner_option_ty = extract_option_inner_type(field_ty);
+
+        let init_tokens = if let Some(inner_ty) = inner_option_ty {
+            if let Some(def) = default_val {
+                quote! {
+                    #field_ident: match std::env::var(#env_var_name) {
+                        Ok(val) if !val.is_empty() => {
+                            let parsed = val.parse::<#inner_ty>().map_err(|e| {
+                                format!("Invalid value for {}: {}", #env_var_name, e)
+                            })?;
+                            Some(parsed)
+                        }
+                        _ => {
+                            let parsed = #def.parse::<#inner_ty>().map_err(|e| {
+                                format!("Invalid default for {}: {}", #env_var_name, e)
+                            })?;
+                            Some(parsed)
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    #field_ident: match std::env::var(#env_var_name) {
+                        Ok(val) if !val.is_empty() => {
+                            let parsed = val.parse::<#inner_ty>().map_err(|e| {
+                                format!("Invalid value for {}: {}", #env_var_name, e)
+                            })?;
+                            Some(parsed)
+                        }
+                        _ => None,
+                    }
+                }
+            }
+        } else if let Some(def) = default_val {
+            quote! {
+                #field_ident: {
+                    let raw = std::env::var(#env_var_name).unwrap_or_else(|_| #def.to_string());
+                    raw.parse::<#field_ty>().map_err(|e| {
+                        format!("Failed to parse environment variable '{}': {}", #env_var_name, e)
+                    })?
+                }
+            }
+        } else {
+            quote! {
+                #field_ident: {
+                    let raw = std::env::var(#env_var_name).map_err(|_| {
+                        format!("Missing required environment variable '{}'", #env_var_name)
+                    })?;
+                    raw.parse::<#field_ty>().map_err(|e| {
+                        format!("Failed to parse environment variable '{}': {}", #env_var_name, e)
+                    })?
+                }
+            }
+        };
+
+        field_inits.push(init_tokens);
+    }
+
+    let expanded = quote! {
+        impl kasi_jb::prelude::FromEnv for #struct_ident {
+            fn from_env() -> Result<Self, String> {
+                Ok(Self {
+                    #(#field_inits),*
+                })
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 /// Helper that translates Rust AST types into OpenAPI 3.1.0 SchemaObject tokens.
+
+fn extract_option_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+        && seg.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner);
+    }
+    None
+}
+
 fn map_rust_type_to_openapi(ty: &syn::Type) -> (proc_macro2::TokenStream, bool) {
     if let syn::Type::Path(type_path) = ty
         && let Some(segment) = type_path.path.segments.last()

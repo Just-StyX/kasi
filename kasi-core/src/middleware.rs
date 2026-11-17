@@ -717,3 +717,150 @@ impl Middleware for TimeoutMiddleware {
         })
     }
 }
+
+// Add to kasi-core/src/middleware.rs
+
+/// Injects standard HTTP security hardening headers onto every outgoing response.
+#[derive(Clone)]
+pub struct SecurityHeadersMiddleware {
+    frame_options: String,
+    hsts_max_age: Option<u64>,
+    csp: Option<String>,
+}
+
+impl SecurityHeadersMiddleware {
+    pub fn new() -> Self {
+        Self {
+            frame_options: "DENY".to_string(),
+            hsts_max_age: Some(31_536_000), // 1 year
+            csp: None,
+        }
+    }
+
+    pub fn frame_options(mut self, policy: impl Into<String>) -> Self {
+        self.frame_options = policy.into();
+        self
+    }
+
+    pub fn hsts_max_age(mut self, seconds: Option<u64>) -> Self {
+        self.hsts_max_age = seconds;
+        self
+    }
+
+    pub fn content_security_policy(mut self, policy: impl Into<String>) -> Self {
+        self.csp = Some(policy.into());
+        self
+    }
+}
+
+impl Default for SecurityHeadersMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Middleware for SecurityHeadersMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let frame_options = self.frame_options.clone();
+        let hsts = self.hsts_max_age;
+        let csp = self.csp.clone();
+
+        Box::pin(async move {
+            let mut res = next(req).await;
+            let headers = res.headers_mut();
+
+            headers.insert(
+                http::header::HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            );
+            if let Ok(val) = HeaderValue::from_str(&frame_options) {
+                headers.insert(
+                    http::header::HeaderName::from_static("x-frame-options"),
+                    val,
+                );
+            }
+            headers.insert(
+                http::header::HeaderName::from_static("referrer-policy"),
+                HeaderValue::from_static("strict-origin-when-cross-origin"),
+            );
+            if let Some(max_age) = hsts
+                && let Ok(val) =
+                    HeaderValue::from_str(&format!("max-age={}; includeSubDomains", max_age))
+            {
+                headers.insert(
+                    http::header::HeaderName::from_static("strict-transport-security"),
+                    val,
+                );
+            }
+            if let Some(policy) = csp
+                && let Ok(val) = HeaderValue::from_str(&policy)
+            {
+                headers.insert(
+                    http::header::HeaderName::from_static("content-security-policy"),
+                    val,
+                );
+            }
+
+            res
+        })
+    }
+}
+
+/// Rejects incoming HTTP requests whose `Content-Length` exceeds `max_bytes` with `413 Payload Too Large`.
+#[derive(Clone)]
+pub struct BodyLimitMiddleware {
+    max_bytes: usize,
+}
+
+impl BodyLimitMiddleware {
+    pub fn new(max_bytes: usize) -> Self {
+        Self { max_bytes }
+    }
+}
+
+impl Middleware for BodyLimitMiddleware {
+    fn handle(
+        &self,
+        req: Request<BoxBody>,
+        next: MiddleChain,
+    ) -> Pin<Box<dyn Future<Output = Response<BoxBody>> + Send + 'static>> {
+        let limit = self.max_bytes;
+        let uri_path = req.uri().path().to_string();
+
+        let content_len = req
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+
+        Box::pin(async move {
+            if let Some(len) = content_len
+                && len > limit
+            {
+                let json_body = serde_json::json!({
+                    "type": "https://kasi.local",
+                    "title": "Payload Too Large",
+                    "status": 413,
+                    "detail": format!("Request payload ({} bytes) exceeds maximum allowed limit of {} bytes.", len, limit),
+                    "instance": uri_path,
+                });
+
+                let body = Full::new(Bytes::from(json_body.to_string()))
+                    .map_err(|e| match e {})
+                    .boxed();
+
+                return Response::builder()
+                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                    .header("Content-Type", "application/problem+json")
+                    .body(body)
+                    .unwrap();
+            }
+
+            next(req).await
+        })
+    }
+}

@@ -316,6 +316,31 @@ let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
     .build()
     .await?;
 ```
+
+### 15. `#[derive(FromEnv)]` typed configuration macro + SecurityHeadersMiddleware / BodyLimitMiddleware
+- `#[derive(FromEnv)] & .with_env_config::<T>()`: Automatic `.env` loading, prefix mapping, default values, and `Option<T>` support registered directly into shared extensions.
+- **SecurityHeadersMiddleware**: OWASP-recommended defense headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Strict-Transport-Security, and Content-Security-Policy) out of the box.
+- **BodyLimitMiddleware**: Rejects oversized payloads early with standardized RFC 7807 413 Payload Too Large problem responses.
+
+```rust
+#[derive(Clone, FromEnv)]
+#[env(prefix = "APP")]
+struct AppSettings {
+    #[env(default = "127.0.0.1")]
+    host: String,
+    #[env(default = "8080")]
+    port: u16,
+    redis_url: Option<String>,
+}
+
+let app = Application::builder(Config { host: "127.0.0.1".into(), port: 8080 })
+    .with_env_config::<AppSettings>()?
+    .middleware(SecurityHeadersMiddleware::new())
+    .middleware(BodyLimitMiddleware::new(1024 * 1024)) // 1 MB max body
+    .build()
+    .await?;
+```
+
 ## Performance Benchmarks
 
 Measured locally on identical `GET /json` endpoints (`100` concurrent connections over `15s` via `oha`, compiled with `RUSTFLAGS="-C target-cpu=native" --release`):

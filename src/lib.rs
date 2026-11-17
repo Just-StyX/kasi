@@ -15,13 +15,16 @@ pub mod prelude {
         RegisterEndpoint, Router,
         cookies::{Cookie, Cookies, SameSite},
         middleware::{
-            CompressionMiddleware, CorsMiddleware, InternalMiddlewareLayer, LogFormat, MiddleChain,
-            Module, Next, RateLimitMiddleware, RegisterRoute, TimeoutMiddleware, TracingMiddleware,
+            BodyLimitMiddleware, CompressionMiddleware, CorsMiddleware, InternalMiddlewareLayer,
+            LogFormat, MiddleChain, Module, Next, RateLimitMiddleware, RegisterRoute,
+            SecurityHeadersMiddleware, TimeoutMiddleware, TracingMiddleware,
         },
         static_files::ServeDir,
         tasks::TaskScheduler,
         ws::{WebSocket, WebSocketUpgrade, WsMessage},
     };
+
+    pub use kasi_core::env_config::{FromEnv, load_dotenv};
 
     #[cfg(feature = "graphql")]
     pub use kasi_core::graphql::{GraphQLRequest, GraphQLResponse, graphiql_playground};
@@ -44,7 +47,7 @@ pub mod prelude {
     pub use http_body_util::{BodyExt, Full};
 
     pub use kasi_core::openapi::{ComponentsSpec, EndpointMetadata, Schema, SchemaObject};
-    pub use kasi_macros::{IntoResponse, Schema, Validate, endpoint, main};
+    pub use kasi_macros::{FromEnv, IntoResponse, Schema, Validate, endpoint, main};
 
     pub use kasi_core::error::{Error, RequestContext, Validate};
     pub use kasi_core::extract::{

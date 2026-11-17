@@ -1256,3 +1256,84 @@ mod graphql_tests {
         assert!(ui_res.text().await.unwrap().contains("GraphiQL"));
     }
 }
+
+// ==========================================
+// 8. FROM_ENV, SECURITY HEADERS & BODY LIMIT TESTS
+// ==========================================
+
+#[derive(Debug, Clone, FromEnv)]
+#[env(prefix = "KASI_TEST")]
+struct TestServiceEnv {
+    #[env(default = "127.0.0.1")]
+    pub host: String,
+    pub port: u16,
+    pub optional_api_key: Option<String>,
+}
+
+#[endpoint(GET, "/env-info")]
+async fn env_info_handler(Extension(cfg): Extension<TestServiceEnv>) -> JsonValue {
+    json!({
+        "host": cfg.host,
+        "port": cfg.port,
+        "has_key": cfg.optional_api_key.is_some(),
+    })
+}
+
+#[tokio::test]
+async fn test_from_env_derive_and_security_middlewares() {
+    unsafe {
+        std::env::set_var("KASI_TEST_PORT", "9095");
+    }
+
+    let mut app = Application::builder(Config {
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .with_env_config::<TestServiceEnv>()
+    .unwrap()
+    .middleware(SecurityHeadersMiddleware::new())
+    .middleware(BodyLimitMiddleware::new(64))
+    .route(env_info_handler)
+    .route(ping_handler)
+    .build()
+    .await
+    .unwrap();
+
+    let listener = app.bind_listener().await.unwrap();
+    let target_addr = app.local_addr();
+
+    tokio::task::spawn(async move {
+        let _ = app.serve_on_listener(listener).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Verify FromEnv values and SecurityHeadersMiddleware headers
+    let res = client
+        .get(&format!("http://{}/env-info", target_addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(res.headers().get("x-frame-options").unwrap(), "DENY");
+
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["host"], "127.0.0.1");
+    assert_eq!(body["port"], 9095);
+    assert_eq!(body["has_key"], false);
+
+    // 2. Verify BodyLimitMiddleware rejects payloads > 64 bytes with 413 Payload Too Large
+    let oversized = client
+        .post(&format!("http://{}/env-info", target_addr))
+        .body("x".repeat(128))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
